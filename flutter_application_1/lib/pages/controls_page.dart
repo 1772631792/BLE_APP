@@ -9,7 +9,7 @@ import '../control_packet.dart';
 import '../theme.dart';
 import '../widgets.dart';
 
-/// 控件页：摇杆 / 滑条 / 按键，支持「独立指令」与「整包」两种发送方式。
+/// 控件页：摇杆 / 右手触控区 / 按键，支持「独立指令」与「整包」两种发送方式。
 class ControlsPage extends StatefulWidget {
   const ControlsPage({super.key, required this.ble});
 
@@ -171,8 +171,13 @@ class ControlBoard extends StatefulWidget {
 class _ControlBoardState extends State<ControlBoard> {
   static const double _toolbarHeight = 38;
 
+  /// 触控区的中位值：X / Y 各 50。
+  static const double _touchMid = 50;
+
   DateTime _lastJoystick = DateTime.fromMillisecondsSinceEpoch(0);
-  DateTime _lastSlider = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastPad = DateTime.fromMillisecondsSinceEpoch(0);
+  int _lastPadX = -1;
+  int _lastPadY = -1;
 
   void _sendCommand(String key, {Map<String, String>? vars}) {
     final ble = widget.ble;
@@ -234,20 +239,39 @@ class _ControlBoardState extends State<ControlBoard> {
     }
   }
 
-  void _onSlider(String key, double value, {bool force = false}) {
-    if (key == 'slider1') {
-      widget.ble.updateControls(sliderA: value);
-    } else {
-      widget.ble.updateControls(sliderB: value);
-    }
+  /// 右手触控区：X / Y 各自 0~100，走原来的滑条通道（s1 / s2）。
+  void _onTouchPad(double x, double y, {bool force = false}) {
+    final ble = widget.ble;
+    final same = (ble.sliderA - x).abs() < .01 && (ble.sliderB - y).abs() < .01;
+    if (same && !force) return;
+    ble.updateControls(sliderA: x, sliderB: y);
+
     final now = DateTime.now();
-    if (!force && now.difference(_lastSlider).inMilliseconds < 80) return;
-    _lastSlider = now;
-    if (widget.ble.controlMode == ControlSendMode.single) {
-      _sendCommand(key, vars: {'v': '${value.round()}'});
-    } else if (force) {
-      widget.ble.sendPacketNow();
+    if (!force && now.difference(_lastPad).inMilliseconds < 60) return;
+    _lastPad = now;
+
+    if (ble.controlMode != ControlSendMode.single) {
+      ble.sendPacketNow();
+      return;
     }
+    // 独立模式：只发变化的那一轴，省一半无线写入。
+    final rx = x.round();
+    final ry = y.round();
+    if (force || rx != _lastPadX) {
+      _lastPadX = rx;
+      _sendCommand('slider1', vars: {'v': '$rx'});
+    }
+    if (force || ry != _lastPadY) {
+      _lastPadY = ry;
+      _sendCommand('slider2', vars: {'v': '$ry'});
+    }
+  }
+
+  /// 回中：X / Y 都回到 50。
+  void _resetTouchPad() {
+    _lastPadX = -1;
+    _lastPadY = -1;
+    _onTouchPad(_touchMid, _touchMid, force: true);
   }
 
   void _onButtonPressed(String key, bool pressed) {
@@ -265,11 +289,21 @@ class _ControlBoardState extends State<ControlBoard> {
     }
   }
 
-  /// 停止：摇杆回中 + 清空按键状态，再发一次。
+  /// 停止：摇杆回中 + 触控区回中 + 清空按键状态，再发一次。
   void _stopAll() {
-    widget.ble.updateControls(joyX: 0, joyY: 0, pressed: {});
+    _lastPadX = -1;
+    _lastPadY = -1;
+    widget.ble.updateControls(
+      joyX: 0,
+      joyY: 0,
+      sliderA: _touchMid,
+      sliderB: _touchMid,
+      pressed: {},
+    );
     if (widget.ble.controlMode == ControlSendMode.single) {
       _sendCommand('stop');
+      _sendCommand('slider1', vars: {'v': '${_touchMid.round()}'});
+      _sendCommand('slider2', vars: {'v': '${_touchMid.round()}'});
     } else {
       widget.ble.sendPacketNow();
     }
@@ -295,38 +329,31 @@ class _ControlBoardState extends State<ControlBoard> {
   // ------------------------------------------------------------- 手柄布局
 
   Widget _wideLayout(BoxConstraints c) {
-    final ble = widget.ble;
     final body = math.max(120.0, c.maxHeight - _toolbarHeight - 6);
     // 摇杆 / 按键都按拇指可覆盖的半径定尺寸，不让手指伸到屏幕中间。
-    final joy = math.min(c.maxWidth * .28, body * .78).clamp(96.0, 300.0);
-    final sliderWidth = math.min(c.maxWidth * .34, 300.0);
+    final joy = math.min(c.maxWidth * .26, body * .78).clamp(96.0, 300.0);
+    // 屏幕右侧约 1/4 宽度、整条高度都留给右手触控区。
+    final padWidth = (c.maxWidth * .24).clamp(96.0, 300.0);
     return Column(
       children: [
         SizedBox(height: _toolbarHeight, child: _toolbar()),
         const SizedBox(height: 6),
         Expanded(
           child: Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               SizedBox(
                 width: joy + 10,
                 child: Column(
-                  mainAxisAlignment: MainAxisAlignment.end,
                   children: [
                     Expanded(
-                      child: FittedBox(
-                        fit: BoxFit.scaleDown,
+                      child: Align(
                         alignment: Alignment.bottomCenter,
-                        child: SizedBox(
-                          width: sliderWidth,
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              _compactSlider('slider1', 'A', ble.sliderA),
-                              const SizedBox(height: 4),
-                              _compactSlider('slider2', 'B', ble.sliderB),
-                            ],
-                          ),
+                        // 矮屏时读数卡整体缩小，避免和摇杆抢出溢出。
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          alignment: Alignment.bottomCenter,
+                          child: SizedBox(width: 106, child: _touchReadout()),
                         ),
                       ),
                     ),
@@ -337,6 +364,8 @@ class _ControlBoardState extends State<ControlBoard> {
               ),
               const SizedBox(width: 6),
               Expanded(child: _arcPadFit()),
+              const SizedBox(width: 10),
+              SizedBox(width: padWidth, child: _touchPad()),
             ],
           ),
         ),
@@ -345,7 +374,6 @@ class _ControlBoardState extends State<ControlBoard> {
   }
 
   Widget _tallLayout() {
-    final ble = widget.ble;
     return Column(
       children: [
         SizedBox(height: _toolbarHeight, child: _toolbar()),
@@ -360,20 +388,13 @@ class _ControlBoardState extends State<ControlBoard> {
           ),
         ),
         const SizedBox(height: 10),
-        Row(
-          children: [
-            Expanded(child: _sliderCard('slider1', 'A', ble.sliderA)),
-            const SizedBox(width: 10),
-            Expanded(child: _sliderCard('slider2', 'B', ble.sliderB)),
-          ],
-        ),
+        _touchRow(height: 104),
       ],
     );
   }
 
-  /// 页内（非全屏）布局：左摇杆 + 右 2×3 大按键，下面两条滑条。
+  /// 页内（非全屏）布局：左摇杆 + 右 2×3 大按键，底部是触控区。
   Widget _compactLayout() {
-    final ble = widget.ble;
     return Column(
       children: [
         SizedBox(height: _toolbarHeight, child: _toolbar()),
@@ -388,14 +409,22 @@ class _ControlBoardState extends State<ControlBoard> {
           ),
         ),
         const SizedBox(height: 10),
-        Row(
-          children: [
-            Expanded(child: _sliderCard('slider1', 'A', ble.sliderA)),
-            const SizedBox(width: 10),
-            Expanded(child: _sliderCard('slider2', 'B', ble.sliderB)),
-          ],
-        ),
+        _touchRow(),
       ],
+    );
+  }
+
+  /// 读数 + 触控区并排，页内与竖屏全屏共用。
+  Widget _touchRow({double height = 96}) {
+    return SizedBox(
+      height: height,
+      child: Row(
+        children: [
+          SizedBox(width: 104, child: _touchReadout()),
+          const SizedBox(width: 10),
+          Expanded(child: _touchPad()),
+        ],
+      ),
     );
   }
 
@@ -646,10 +675,30 @@ class _ControlBoardState extends State<ControlBoard> {
       icon: spec.icon,
       primary: spec.primary,
       enabled: widget.ble.connected,
+      latch: command.latch,
+      active: widget.ble.pressedKeys.contains(spec.key),
       onDown: () => _onButtonPressed(spec.key, true),
       onUp: () => _onButtonPressed(spec.key, false),
       onRepeat: () => _repeatCommand(spec.key),
+      onToggle: (on) => _onLatchToggle(spec.key, on),
     );
+  }
+
+  /// 开关式按键：点一次置位并发送，再点一次复位并再发一次。
+  void _onLatchToggle(String key, bool on) {
+    final ble = widget.ble;
+    final next = {...ble.pressedKeys};
+    if (on) {
+      next.add(key);
+    } else {
+      next.remove(key);
+    }
+    ble.updateControls(pressed: next);
+    if (ble.controlMode == ControlSendMode.single) {
+      _sendCommand(key);
+    } else {
+      ble.sendPacketNow();
+    }
   }
 
   /// 长按重复：独立模式补发该键指令（按住喇叭一直响）；
@@ -659,130 +708,96 @@ class _ControlBoardState extends State<ControlBoard> {
     _sendCommand(key);
   }
 
-  Widget _sliderCard(String key, String tag, double value) {
-    final command = widget.ble.command(key);
+  /// A / B 原来的位置：只显示触控区当前发出的 X / Y，长按可改指令。
+  Widget _touchReadout() {
+    final ble = widget.ble;
     return Container(
-      padding: const EdgeInsets.fromLTRB(10, 6, 10, 2),
+      padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
       decoration: BoxDecoration(
         color: AppColors.surface.withValues(alpha: .85),
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: AppColors.stroke),
       ),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          GestureDetector(
-            onLongPress: () => showCommandEditor(context, widget.ble, key),
-            child: Row(
-              children: [
-                MiniTag(label: tag, color: AppColors.accent),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    command.label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 10.5, color: AppColors.textDim),
-                  ),
-                ),
-                Text(
-                  '${value.round()}',
-                  style: const TextStyle(
-                    fontSize: 11,
-                    fontFamily: 'monospace',
-                    color: AppColors.accent,
-                  ),
-                ),
-              ],
-            ),
+          Row(
+            children: [
+              const MiniTag(label: 'X/Y', color: AppColors.accent),
+              const Spacer(),
+              _resetPadIcon(),
+            ],
           ),
-          SliderTheme(
-            data: SliderTheme.of(context).copyWith(
-              trackHeight: 3,
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-              overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
-              activeTrackColor: AppColors.accent,
-              inactiveTrackColor: AppColors.stroke,
-              thumbColor: AppColors.accent,
-              overlayColor: AppColors.accent.withValues(alpha: .15),
-            ),
-            child: Slider(
-              value: value,
-              max: 100,
-              onChanged: (v) => _onSlider(key, v),
-              // 松手时补发最后一帧，避免节流把终值丢掉。
-              onChangeEnd: (v) => _onSlider(key, v, force: true),
-            ),
-          ),
+          const SizedBox(height: 2),
+          _readoutLine('slider1', 'X', ble.sliderA),
+          _readoutLine('slider2', 'Y', ble.sliderB),
         ],
       ),
     );
   }
 
-  /// 横屏紧凑滑条：一行搞定，给摇杆和按键让出垂直空间。
-  Widget _compactSlider(String key, String tag, double value) {
-    return Container(
-      height: 42,
-      padding: const EdgeInsets.only(left: 8, right: 4),
-      decoration: BoxDecoration(
-        color: AppColors.surface.withValues(alpha: .8),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.stroke),
-      ),
-      child: Row(
-        children: [
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onLongPress: () => showCommandEditor(context, widget.ble, key),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-              decoration: BoxDecoration(
-                color: AppColors.accent.withValues(alpha: .12),
-                borderRadius: BorderRadius.circular(7),
-              ),
-              child: Text(
-                tag,
-                style: const TextStyle(
-                  fontSize: 10,
-                  fontWeight: FontWeight.w800,
-                  color: AppColors.accent,
-                ),
-              ),
-            ),
-          ),
-          Expanded(
-            child: SliderTheme(
-              data: SliderTheme.of(context).copyWith(
-                trackHeight: 4,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-                overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
-                activeTrackColor: AppColors.accent,
-                inactiveTrackColor: AppColors.stroke,
-                thumbColor: AppColors.accent,
-                overlayColor: AppColors.accent.withValues(alpha: .16),
-              ),
-              child: Slider(
-                value: value,
-                max: 100,
-                onChanged: (v) => _onSlider(key, v),
-                onChangeEnd: (v) => _onSlider(key, v, force: true),
-              ),
-            ),
-          ),
-          SizedBox(
-            width: 24,
-            child: Text(
-              '${value.round()}',
-              textAlign: TextAlign.right,
+  Widget _readoutLine(String key, String axis, double value) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onLongPress: () => showCommandEditor(context, widget.ble, key),
+      child: Padding(
+        padding: const EdgeInsets.only(top: 1, right: 2),
+        child: Row(
+          children: [
+            Text(
+              axis,
               style: const TextStyle(
                 fontSize: 10.5,
+                fontWeight: FontWeight.w700,
+                color: AppColors.textDim,
+              ),
+            ),
+            const Spacer(),
+            Text(
+              '${value.round()}',
+              style: const TextStyle(
+                fontSize: 17,
+                height: 1.15,
+                fontWeight: FontWeight.w700,
                 fontFamily: 'monospace',
                 color: AppColors.accent,
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
+    );
+  }
+
+  Widget _resetPadIcon() {
+    return InkWell(
+      borderRadius: BorderRadius.circular(8),
+      onTap: _resetTouchPad,
+      child: Container(
+        padding: const EdgeInsets.all(3),
+        decoration: BoxDecoration(
+          color: AppColors.surfaceAlt.withValues(alpha: .9),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: AppColors.stroke),
+        ),
+        child: const Icon(
+          Icons.filter_center_focus_rounded,
+          size: 12,
+          color: AppColors.textDim,
+        ),
+      ),
+    );
+  }
+
+  Widget _touchPad() {
+    final ble = widget.ble;
+    return TouchScrubPad(
+      x: ble.sliderA,
+      y: ble.sliderB,
+      onChanged: _onTouchPad,
+      onRelease: (x, y) => _onTouchPad(x, y, force: true),
     );
   }
 }
@@ -815,8 +830,8 @@ const List<_PadSpec> _padSpecs = [
   _PadSpec('k2', .415, .780, .112, icon: Icons.campaign_rounded),
   _PadSpec('k3', .524, .546, .112, icon: Icons.lightbulb_rounded),
   _PadSpec('k4', .773, .480, .112, icon: Icons.tune_rounded),
-  _PadSpec('k5', .195, .640, .098, icon: Icons.healing_rounded),
-  _PadSpec('k6', .195, .855, .098, icon: Icons.home_rounded),
+  _PadSpec('k5', .195, .640, .098, icon: Icons.filter_5_rounded),
+  _PadSpec('k6', .195, .855, .098, icon: Icons.filter_6_rounded),
 ];
 
 /// 圆形技能键：按下缩小 + 发光 + 描边提亮 + 触感，松开带一点回弹；
@@ -829,6 +844,9 @@ class PadButton extends StatefulWidget {
     required this.onDown,
     required this.onUp,
     this.onRepeat,
+    this.onToggle,
+    this.latch = false,
+    this.active = false,
     this.primary = false,
     this.enabled = true,
   });
@@ -840,6 +858,15 @@ class PadButton extends StatefulWidget {
 
   /// 长按后的重复触发；为 null 时只保持按下态。
   final VoidCallback? onRepeat;
+
+  /// 开关式按键：点一次切换，回调目标状态。
+  final ValueChanged<bool>? onToggle;
+
+  /// 是否开关式（按一次保持点亮）。
+  final bool latch;
+
+  /// 开关式的当前状态。
+  final bool active;
   final bool primary;
   final bool enabled;
 
@@ -876,6 +903,11 @@ class _PadButtonState extends State<PadButton>
     // 未连接也照样给视觉 / 触感反馈，只是不触发指令（发送层自己也会拦）。
     HapticFeedback.lightImpact();
     _ripple.forward(from: 0);
+    if (widget.latch) {
+      // 开关式：点一下直接切换，不等松手。
+      widget.onToggle?.call(!widget.active);
+      return;
+    }
     setState(() {
       _down = true;
       _pressedSent = widget.enabled;
@@ -901,6 +933,7 @@ class _PadButtonState extends State<PadButton>
   }
 
   void _release() {
+    if (widget.latch) return;
     final wasHolding = _holding;
     final sent = _pressedSent;
     _pressedSent = false;
@@ -929,9 +962,10 @@ class _PadButtonState extends State<PadButton>
       child: LayoutBuilder(
         builder: (context, constraints) {
           final diameter = math.min(constraints.maxWidth, constraints.maxHeight);
-          final down = _down;
-          final holding = _holding;
-          final active = down || holding;
+          // 开关式按键的亮灭看外部状态；普通按键看是否按住。
+          final down = widget.latch ? widget.active : _down;
+          final holding = widget.latch ? false : _holding;
+          final lit = down || holding;
           final tint = widget.primary ? AppColors.accent : AppColors.sky;
           final iconColor = widget.primary
               ? (down ? Colors.white : AppColors.onAccent)
@@ -941,7 +975,8 @@ class _PadButtonState extends State<PadButton>
               : (down ? Colors.white : AppColors.text.withValues(alpha: .9));
 
           return AnimatedScale(
-            scale: down ? .87 : 1,
+            // 开关式锁定后不缩着，只保持高亮。
+            scale: widget.latch ? 1 : (down ? .87 : 1),
             duration: Duration(milliseconds: down ? 60 : 180),
             curve: down ? Curves.easeOut : Curves.easeOutBack,
             child: Stack(
@@ -967,10 +1002,10 @@ class _PadButtonState extends State<PadButton>
                                 ]),
                     ),
                     border: Border.all(
-                      color: active
+                      color: lit
                           ? Colors.white.withValues(alpha: widget.primary ? .9 : .8)
                           : (widget.primary ? AppColors.accentDeep : AppColors.stroke),
-                      width: active ? (holding ? 3 : 2.4) : 1.2,
+                      width: lit ? (holding ? 3 : 2.4) : 1.2,
                     ),
                     boxShadow: [
                       BoxShadow(
@@ -1183,7 +1218,7 @@ class _ControlSettingsSheetState extends State<ControlSettingsSheet> {
                   child: _modeCard(
                     selected: ble.controlMode == ControlSendMode.single,
                     title: '独立指令',
-                    desc: '每个按键 / 滑条各发一包，适合简单协议',
+                    desc: '每个按键 / 触控轴各发一包，适合简单协议',
                     icon: Icons.bolt_rounded,
                     onTap: () {
                       ble.setControlMode(ControlSendMode.single);
@@ -1196,7 +1231,7 @@ class _ControlSettingsSheetState extends State<ControlSettingsSheet> {
                   child: _modeCard(
                     selected: ble.controlMode == ControlSendMode.packet,
                     title: '整包发送',
-                    desc: '摇杆 / 滑条 / 按键合成一个固定结构包',
+                    desc: '摇杆 / 触控区 / 按键合成一个固定结构包',
                     icon: Icons.inventory_2_rounded,
                     onTap: () {
                       ble.setControlMode(ControlSendMode.packet);
@@ -1293,7 +1328,7 @@ class _ControlSettingsSheetState extends State<ControlSettingsSheet> {
                 const _SheetLabel('控件指令'),
                 const Spacer(),
                 const Text(
-                  '摇杆 / 滑条标签可长按直接改',
+                  '摇杆标签、X/Y 读数可长按直接改',
                   style: TextStyle(fontSize: 10, color: AppColors.textDim),
                 ),
               ],
@@ -1313,7 +1348,9 @@ class _ControlSettingsSheetState extends State<ControlSettingsSheet> {
                     subtitle: Text(
                       command.payload.isEmpty
                           ? '（空）'
-                          : '${command.hex ? 'HEX · ' : ''}${command.payload}',
+                          : '${command.hex ? 'HEX · ' : ''}'
+                              '${command.latch ? '开关 · ' : ''}'
+                              '${command.payload}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
@@ -1428,6 +1465,7 @@ Future<void> showCommandEditor(
   final labelController = TextEditingController(text: command.label);
   final payloadController = TextEditingController(text: command.payload);
   var hex = command.hex;
+  var latch = command.latch;
 
   final saved = await showDialog<bool>(
     context: context,
@@ -1467,6 +1505,18 @@ Future<void> showCommandEditor(
                 value: hex,
                 onChanged: (value) => setDialogState(() => hex = value),
               ),
+              if (key.startsWith('k'))
+                SwitchListTile.adaptive(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('开关式按键', style: TextStyle(fontSize: 12.5)),
+                  subtitle: const Text(
+                    '按一次保持点亮，再按一次取消',
+                    style: TextStyle(fontSize: 10.5, color: AppColors.textDim),
+                  ),
+                  value: latch,
+                  onChanged: (value) => setDialogState(() => latch = value),
+                ),
               Text(
                 key == 'joystick'
                     ? '可用变量：{x} {y}（-128 ~ 127，HEX 时 +128 转成单字节 0~255）'
@@ -1509,6 +1559,7 @@ Future<void> showCommandEditor(
             : labelController.text.trim(),
         payload: payloadController.text.trim(),
         hex: hex,
+        latch: latch,
       ),
     );
   }
@@ -1779,4 +1830,219 @@ class _RipplePainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _RipplePainter oldDelegate) =>
       oldDelegate.progress != progress;
+}
+
+/// 右手触控区：按下即定位（点哪到哪），之后继续搓动按位移增量微调，
+/// 输出 0~100 的 X / Y（向上为 Y 增大），松手保持当前值。
+///
+/// 和摇杆一样用 Listener 直接读指针：不和其它手势竞争，只跟随第一根手指。
+class TouchScrubPad extends StatefulWidget {
+  const TouchScrubPad({
+    super.key,
+    required this.x,
+    required this.y,
+    required this.onChanged,
+    required this.onRelease,
+  });
+
+  /// 外部当前值（0~100），用于回中 / 停止时同步。
+  final double x;
+  final double y;
+
+  final void Function(double x, double y) onChanged;
+  final void Function(double x, double y) onRelease;
+
+  @override
+  State<TouchScrubPad> createState() => _TouchScrubPadState();
+}
+
+class _TouchScrubPadState extends State<TouchScrubPad> {
+  /// 搓过区域尺寸的 0.75 大致走完 0~100：太灵容易飘，太钝要搓好几下。
+  static const double _travel = .75;
+
+  double _x = 50;
+  double _y = 50;
+  bool _active = false;
+  int? _pointer;
+  Offset _last = Offset.zero;
+
+  @override
+  void initState() {
+    super.initState();
+    _x = widget.x;
+    _y = widget.y;
+  }
+
+  @override
+  void didUpdateWidget(covariant TouchScrubPad oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 拖动中由本地值主导，避免父级还没 rebuild 时把增量吞掉。
+    if (_active) return;
+    if (oldWidget.x != widget.x || oldWidget.y != widget.y) {
+      _x = widget.x;
+      _y = widget.y;
+    }
+  }
+
+  void _poke(double x, double y) {
+    setState(() {
+      _x = x.clamp(0.0, 100.0);
+      _y = y.clamp(0.0, 100.0);
+    });
+    widget.onChanged(_x, _y);
+  }
+
+  void _down(Offset local, Size size) {
+    HapticFeedback.lightImpact();
+    _last = local;
+    _active = true;
+    _poke(local.dx / size.width * 100, 100 - local.dy / size.height * 100);
+  }
+
+  void _move(Offset local, Size size) {
+    final dx = local.dx - _last.dx;
+    final dy = local.dy - _last.dy;
+    _last = local;
+    if (dx == 0 && dy == 0) return;
+    _poke(
+      _x + dx / (size.width * _travel) * 100,
+      _y - dy / (size.height * _travel) * 100,
+    );
+  }
+
+  void _release() {
+    if (_pointer == null) return;
+    _pointer = null;
+    _active = false;
+    setState(() {});
+    widget.onRelease(_x, _y);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final size = Size(constraints.maxWidth, constraints.maxHeight);
+        if (!size.width.isFinite || !size.height.isFinite) {
+          return const SizedBox.shrink();
+        }
+        return Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: (event) {
+            // 只认第一根手指，另一只手按按键不会打断搓动。
+            if (_pointer != null) return;
+            _pointer = event.pointer;
+            _down(event.localPosition, size);
+          },
+          onPointerMove: (event) {
+            if (event.pointer != _pointer) return;
+            _move(event.localPosition, size);
+          },
+          onPointerUp: (event) {
+            if (event.pointer != _pointer) return;
+            _release();
+          },
+          onPointerCancel: (event) {
+            if (event.pointer != _pointer) return;
+            _release();
+          },
+          child: CustomPaint(
+            painter: _ScrubPadPainter(x: _x, y: _y, active: _active),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// 触控区外观：圆角底板 + 4×4 网格 + 跟随手指的十字准星。
+class _ScrubPadPainter extends CustomPainter {
+  _ScrubPadPainter({required this.x, required this.y, required this.active});
+
+  final double x;
+  final double y;
+  final bool active;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.width <= 0 || size.height <= 0) return;
+    final rect = Offset.zero & size;
+    final rrect = RRect.fromRectAndRadius(
+      rect.deflate(.75),
+      const Radius.circular(18),
+    );
+
+    canvas.drawRRect(
+      rrect,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            AppColors.surfaceAlt,
+            AppColors.bgAlt.withValues(alpha: .95),
+          ],
+        ).createShader(rect),
+    );
+
+    final grid = Paint()
+      ..strokeWidth = 1
+      ..color = AppColors.stroke.withValues(alpha: .55);
+    for (var i = 1; i < 4; i++) {
+      final fx = size.width * i / 4;
+      final fy = size.height * i / 4;
+      canvas.drawLine(Offset(fx, 2), Offset(fx, size.height - 2), grid);
+      canvas.drawLine(Offset(2, fy), Offset(size.width - 2, fy), grid);
+    }
+
+    final cx = (x / 100).clamp(0.0, 1.0) * size.width;
+    final cy = (1 - y / 100).clamp(0.0, 1.0) * size.height;
+    final knob = Offset(cx, cy);
+
+    final cross = Paint()
+      ..strokeWidth = active ? 1.6 : 1
+      ..color = AppColors.accent.withValues(alpha: active ? .5 : .26);
+    canvas.drawLine(Offset(cx, 2), Offset(cx, size.height - 2), cross);
+    canvas.drawLine(Offset(2, cy), Offset(size.width - 2, cy), cross);
+
+    if (active) {
+      canvas.drawCircle(
+        knob,
+        26,
+        Paint()
+          ..shader = RadialGradient(
+            colors: [
+              AppColors.accent.withValues(alpha: .34),
+              AppColors.accent.withValues(alpha: 0),
+            ],
+          ).createShader(Rect.fromCircle(center: knob, radius: 26)),
+      );
+    }
+    canvas.drawCircle(
+      knob,
+      9,
+      Paint()..color = AppColors.accent.withValues(alpha: active ? .9 : .5),
+    );
+    canvas.drawCircle(
+      knob,
+      9,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2
+        ..color = Colors.white.withValues(alpha: .25),
+    );
+
+    canvas.drawRRect(
+      rrect,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = active ? 1.8 : 1.2
+        ..color =
+            active ? AppColors.accent.withValues(alpha: .55) : AppColors.stroke,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _ScrubPadPainter oldDelegate) =>
+      oldDelegate.x != x || oldDelegate.y != y || oldDelegate.active != active;
 }

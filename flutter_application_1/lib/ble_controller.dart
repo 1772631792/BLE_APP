@@ -45,17 +45,27 @@ class ControlCommand {
     required this.label,
     required this.payload,
     this.hex = false,
+    this.latch = false,
   });
 
   final String label;
   final String payload;
   final bool hex;
 
-  ControlCommand copyWith({String? label, String? payload, bool? hex}) =>
+  /// 开关式按键：按一次保持点亮，再按一次复位。
+  final bool latch;
+
+  ControlCommand copyWith({
+    String? label,
+    String? payload,
+    bool? hex,
+    bool? latch,
+  }) =>
       ControlCommand(
         label: label ?? this.label,
         payload: payload ?? this.payload,
         hex: hex ?? this.hex,
+        latch: latch ?? this.latch,
       );
 }
 
@@ -85,10 +95,10 @@ class BleController extends ChangeNotifier {
     'k2': const ControlCommand(label: '按键2', payload: '2'),
     'k3': const ControlCommand(label: '按键3', payload: '3'),
     'k4': const ControlCommand(label: '按键4', payload: '4'),
-    'k5': const ControlCommand(label: '恢复', payload: '5'),
-    'k6': const ControlCommand(label: '回城', payload: '6'),
-    'slider1': const ControlCommand(label: '滑条 A', payload: '{v}'),
-    'slider2': const ControlCommand(label: '滑条 B', payload: '{v}'),
+    'k5': const ControlCommand(label: '按键5', payload: '5', latch: true),
+    'k6': const ControlCommand(label: '按键6', payload: '6'),
+    'slider1': const ControlCommand(label: '触控 X', payload: '{v}'),
+    'slider2': const ControlCommand(label: '触控 Y', payload: '{v}'),
     'joystick': const ControlCommand(label: '摇杆', payload: '{x},{y}'),
   };
 
@@ -99,8 +109,9 @@ class BleController extends ChangeNotifier {
   int _packetIntervalMs = 50;
   double _joyX = 0;
   double _joyY = 0;
-  double _sliderA = 0;
-  double _sliderB = 0;
+  // 触控区默认停在中位（X / Y 各 50）。
+  double _sliderA = 50;
+  double _sliderB = 50;
   Set<String> _pressedKeys = {};
   String? _lastSentPreview;
   String? _lastPacketError;
