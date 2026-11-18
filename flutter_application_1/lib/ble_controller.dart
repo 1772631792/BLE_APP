@@ -109,9 +109,9 @@ class BleController extends ChangeNotifier {
   int _packetIntervalMs = 50;
   double _joyX = 0;
   double _joyY = 0;
-  // 触控区默认停在中位（X / Y 各 50）。
-  double _sliderA = 50;
-  double _sliderB = 50;
+  // 搓动轴：没搓时是 0，范围 -100 ~ 100。
+  double _sliderA = 0;
+  double _sliderB = 0;
   Set<String> _pressedKeys = {};
   String? _lastSentPreview;
   String? _lastPacketError;
@@ -986,8 +986,9 @@ class BleController extends ChangeNotifier {
       // HEX 里用 int8 的补码形式：-128~127 + 128 → 0~255
       'x': (joyXInt + 128).clamp(0, 255),
       'y': (joyYInt + 128).clamp(0, 255),
-      's1': _sliderA.round().clamp(0, 100),
-      's2': _sliderB.round().clamp(0, 100),
+      // 搓动轴是 -100~100，wire 上压成 0~100，50 = 没搓。
+      's1': ((_sliderA + 100) / 2).round().clamp(0, 100),
+      's2': ((_sliderB + 100) / 2).round().clamp(0, 100),
       'btn': pressedBitmap,
       'k1': _pressedKeys.contains('k1') ? 1 : 0,
       'k2': _pressedKeys.contains('k2') ? 1 : 0,
