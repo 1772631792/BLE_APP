@@ -4,6 +4,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'control_packet.dart';
 import 'wave.dart';
@@ -97,21 +98,25 @@ class BleController extends ChangeNotifier {
     'k4': const ControlCommand(label: '按键4', payload: '4'),
     'k5': const ControlCommand(label: '按键5', payload: '5', latch: true),
     'k6': const ControlCommand(label: '按键6', payload: '6'),
-    'slider1': const ControlCommand(label: '触控 X', payload: '{v}'),
-    'slider2': const ControlCommand(label: '触控 Y', payload: '{v}'),
+    'slider1': const ControlCommand(label: '滑条 A', payload: '{v}'),
+    'slider2': const ControlCommand(label: '滑条 B', payload: '{v}'),
+    'touch': const ControlCommand(label: '右手搓动', payload: '{tx},{ty}'),
     'joystick': const ControlCommand(label: '摇杆', payload: '{x},{y}'),
   };
 
   // 控件整包模式
   ControlSendMode _controlMode = ControlSendMode.single;
-  String _packetTemplate = 'AA 55 {x} {y} {s1} {s2} {btn} 55 AA';
+  String _packetTemplate = 'AA 55 {x} {y} {s1} {s2} {tx} {ty} {btn} 55 AA';
   bool _packetHex = true;
   int _packetIntervalMs = 50;
   double _joyX = 0;
   double _joyY = 0;
-  // 搓动轴：没搓时是 0，范围 -100 ~ 100。
+  // 滑条 A / B：0~100。
   double _sliderA = 0;
   double _sliderB = 0;
+  // 右手搓动：没搓时是 0，范围 -128 ~ 127。
+  double _touchX = 0;
+  double _touchY = 0;
   Set<String> _pressedKeys = {};
   String? _lastSentPreview;
   String? _lastPacketError;
@@ -189,6 +194,8 @@ class BleController extends ChangeNotifier {
   double get joyY => _joyY;
   double get sliderA => _sliderA;
   double get sliderB => _sliderB;
+  double get touchX => _touchX;
+  double get touchY => _touchY;
   Set<String> get pressedKeys => _pressedKeys;
 
   bool get scanning => _scanning;
@@ -211,6 +218,8 @@ class BleController extends ChangeNotifier {
   // ------------------------------------------------------------- lifecycle
 
   Future<void> init() async {
+    // 先把上次的自定义设置读回来，再开始处理蓝牙事件。
+    await _loadSettings();
     _scanSub = FlutterBluePlus.scanResults.listen(
       _onScanResults,
       onError: (Object e) => _log('扫描异常：${_friendly(e)}', LogKind.error),
@@ -869,10 +878,107 @@ class BleController extends ChangeNotifier {
     }
   }
 
+  // ----------------------------------------------------------- persistence
+
+  /// 自定义设置落盘：命令、模板、发送模式、各类开关，重启后自动恢复。
+  static const String _kCommands = 'settings.commands';
+  static const String _kTemplate = 'settings.packetTemplate';
+  static const String _kPacketHex = 'settings.packetHex';
+  static const String _kPacketInterval = 'settings.packetIntervalMs';
+  static const String _kControlMode = 'settings.controlMode';
+  static const String _kAutoReconnect = 'settings.autoReconnect';
+  static const String _kKeepAlive = 'settings.keepAlive';
+  static const String _kAutoOpenTerminal = 'settings.autoOpenTerminal';
+  static const String _kHexSend = 'settings.hexSend';
+  static const String _kHexReceive = 'settings.hexReceive';
+
+  SharedPreferences? _prefs;
+
+  Future<void> _loadSettings() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _prefs = prefs;
+
+      final raw = prefs.getString(_kCommands);
+      if (raw != null && raw.isNotEmpty) {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          decoded.forEach((key, value) {
+            if (key is! String || value is! Map) return;
+            _commands[key] = ControlCommand(
+              label: value['label'] as String? ?? key,
+              payload: value['payload'] as String? ?? '',
+              hex: value['hex'] == true,
+              latch: value['latch'] == true,
+            );
+          });
+        }
+      }
+
+      final template = prefs.getString(_kTemplate);
+      if (template != null && template.trim().isNotEmpty) {
+        _packetTemplate = template;
+      }
+      _packetHex = prefs.getBool(_kPacketHex) ?? _packetHex;
+      _packetIntervalMs =
+          (prefs.getInt(_kPacketInterval) ?? _packetIntervalMs).clamp(20, 1000);
+      final mode = prefs.getString(_kControlMode);
+      if (mode == ControlSendMode.packet.name) {
+        _controlMode = ControlSendMode.packet;
+      } else if (mode == ControlSendMode.single.name) {
+        _controlMode = ControlSendMode.single;
+      }
+      _autoReconnect = prefs.getBool(_kAutoReconnect) ?? _autoReconnect;
+      _keepAlive = prefs.getBool(_kKeepAlive) ?? _keepAlive;
+      _autoOpenTerminal = prefs.getBool(_kAutoOpenTerminal) ?? _autoOpenTerminal;
+      _hexSend = prefs.getBool(_kHexSend) ?? _hexSend;
+      _hexReceive = prefs.getBool(_kHexReceive) ?? _hexReceive;
+
+      _log('已恢复上次保存的设置', LogKind.system);
+      _notify();
+    } catch (e) {
+      _log('读取本地设置失败：$e', LogKind.error);
+    }
+  }
+
+  void _saveCommands() {
+    final prefs = _prefs;
+    if (prefs == null) return;
+    final map = <String, Object?>{
+      for (final entry in _commands.entries)
+        entry.key: <String, Object?>{
+          'label': entry.value.label,
+          'payload': entry.value.payload,
+          'hex': entry.value.hex,
+          'latch': entry.value.latch,
+        },
+    };
+    unawaited(prefs.setString(_kCommands, jsonEncode(map)));
+  }
+
+  void _saveBool(String key, bool value) {
+    final prefs = _prefs;
+    if (prefs == null) return;
+    unawaited(prefs.setBool(key, value));
+  }
+
+  void _saveInt(String key, int value) {
+    final prefs = _prefs;
+    if (prefs == null) return;
+    unawaited(prefs.setInt(key, value));
+  }
+
+  void _saveString(String key, String value) {
+    final prefs = _prefs;
+    if (prefs == null) return;
+    unawaited(prefs.setString(key, value));
+  }
+
   // -------------------------------------------------------------- settings
 
   void setAutoReconnect(bool value) {
     _autoReconnect = value;
+    _saveBool(_kAutoReconnect, value);
     if (!value) {
       _reconnectTimer?.cancel();
       if (_phase == LinkPhase.reconnecting) {
@@ -886,6 +992,7 @@ class BleController extends ChangeNotifier {
 
   void setKeepAlive(bool value) {
     _keepAlive = value;
+    _saveBool(_kKeepAlive, value);
     if (value) {
       _startKeepAlive();
     } else {
@@ -897,16 +1004,19 @@ class BleController extends ChangeNotifier {
 
   void setHexSend(bool value) {
     _hexSend = value;
+    _saveBool(_kHexSend, value);
     _notify();
   }
 
   void setAutoOpenTerminal(bool value) {
     _autoOpenTerminal = value;
+    _saveBool(_kAutoOpenTerminal, value);
     _log(value ? '连接成功后自动进入数据页' : '连接成功后留在设备页', LogKind.info);
   }
 
   void setHexReceive(bool value) {
     _hexReceive = value;
+    _saveBool(_kHexReceive, value);
     _notify();
   }
 
@@ -922,7 +1032,9 @@ class BleController extends ChangeNotifier {
 
   void updateCommand(String key, ControlCommand command) {
     _commands[key] = command;
+    _saveCommands();
     _log('控件指令已更新：${command.label}', LogKind.info);
+    _notify();
   }
 
   // ------------------------------------------------------- 控件发送模式
@@ -930,6 +1042,7 @@ class BleController extends ChangeNotifier {
   void setControlMode(ControlSendMode mode) {
     if (_controlMode == mode) return;
     _controlMode = mode;
+    _saveString(_kControlMode, mode.name);
     _syncPacketTimer();
     _log(
       mode == ControlSendMode.single ? '控件：独立指令模式' : '控件：整包模式',
@@ -940,16 +1053,19 @@ class BleController extends ChangeNotifier {
   void setPacketTemplate(String template) {
     _packetTemplate = template;
     _lastPacketError = null;
+    _saveString(_kTemplate, template);
   }
 
   void setPacketHex(bool value) {
     _packetHex = value;
     _lastPacketError = null;
+    _saveBool(_kPacketHex, value);
     _notify();
   }
 
   void setPacketIntervalMs(int milliseconds) {
     _packetIntervalMs = milliseconds.clamp(20, 1000);
+    _saveInt(_kPacketInterval, _packetIntervalMs);
     _syncPacketTimer();
     _notify();
   }
@@ -959,13 +1075,17 @@ class BleController extends ChangeNotifier {
     double? joyY,
     double? sliderA,
     double? sliderB,
+    double? touchX,
+    double? touchY,
     Set<String>? pressed,
   }) {
     if (joyX != null) _joyX = joyX.clamp(-1.0, 1.0).toDouble();
     if (joyY != null) _joyY = joyY.clamp(-1.0, 1.0).toDouble();
-    // 搓动轴是有符号的：反向搓必须是负数，不能夹到 0。
-    if (sliderA != null) _sliderA = sliderA.clamp(-128.0, 127.0).toDouble();
-    if (sliderB != null) _sliderB = sliderB.clamp(-128.0, 127.0).toDouble();
+    // 滑条是绝对值 0~100；搓动是有符号的，反向必须是负数。
+    if (sliderA != null) _sliderA = sliderA.clamp(0.0, 100.0).toDouble();
+    if (sliderB != null) _sliderB = sliderB.clamp(0.0, 100.0).toDouble();
+    if (touchX != null) _touchX = touchX.clamp(-128.0, 127.0).toDouble();
+    if (touchY != null) _touchY = touchY.clamp(-128.0, 127.0).toDouble();
     if (pressed != null) _pressedKeys = pressed;
     _notify();
   }
@@ -983,17 +1103,20 @@ class BleController extends ChangeNotifier {
   int get joyYInt => (_joyY * 127).round().clamp(-128, 127);
 
   /// 搓动轴同样是有符号单字节：反向搓是负数，0 表示没搓。
-  int get scrubXInt => _sliderA.round().clamp(-128, 127);
-  int get scrubYInt => _sliderB.round().clamp(-128, 127);
+  int get scrubXInt => _touchX.round().clamp(-128, 127);
+  int get scrubYInt => _touchY.round().clamp(-128, 127);
 
   Map<String, int> _packetIntValues() {
     return {
       // HEX 里用 int8 的补码形式：-128~127 + 128 → 0~255
       'x': (joyXInt + 128).clamp(0, 255),
       'y': (joyYInt + 128).clamp(0, 255),
-      // 搓动轴和摇杆一样是 int8：HEX 里 +128 成 0~255，包长不变。
-      's1': (scrubXInt + 128).clamp(0, 255),
-      's2': (scrubYInt + 128).clamp(0, 255),
+      // 滑条是绝对值 0~100，一个字节足够。
+      's1': _sliderA.round().clamp(0, 100),
+      's2': _sliderB.round().clamp(0, 100),
+      // 搓动和摇杆一样是 int8：+128 成 0~255。
+      'tx': (scrubXInt + 128).clamp(0, 255),
+      'ty': (scrubYInt + 128).clamp(0, 255),
       'btn': pressedBitmap,
       'k1': _pressedKeys.contains('k1') ? 1 : 0,
       'k2': _pressedKeys.contains('k2') ? 1 : 0,
@@ -1009,8 +1132,10 @@ class BleController extends ChangeNotifier {
     return {
       'x': '$joyXInt',
       'y': '$joyYInt',
-      's1': '$scrubXInt',
-      's2': '$scrubYInt',
+      's1': '${ints['s1']}',
+      's2': '${ints['s2']}',
+      'tx': '$scrubXInt',
+      'ty': '$scrubYInt',
       'btn': '${ints['btn']}',
       'k1': '${ints['k1']}',
       'k2': '${ints['k2']}',

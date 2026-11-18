@@ -175,6 +175,7 @@ class _ControlBoardState extends State<ControlBoard> {
   static const double _scrubTravel = .35;
 
   DateTime _lastJoystick = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastSlider = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastScrub = DateTime.fromMillisecondsSinceEpoch(0);
   int _lastScrubX = 1 << 30;
   int _lastScrubY = 1 << 30;
@@ -212,8 +213,10 @@ class _ControlBoardState extends State<ControlBoard> {
     final values = <String, int>{};
     vars?.forEach((name, value) {
       final raw = int.tryParse(value) ?? 0;
-      values[name] =
-          name == 'x' || name == 'y' ? (raw + 128).clamp(0, 255) : raw;
+      // 摇杆 / 搓动都是有符号量，HEX 里统一 +128 压成单字节。
+      values[name] = (name == 'x' || name == 'y' || name == 'tx' || name == 'ty')
+          ? (raw + 128).clamp(0, 255)
+          : raw;
     });
     try {
       ble.sendBytes(buildHexPacket(template, values));
@@ -250,9 +253,9 @@ class _ControlBoardState extends State<ControlBoard> {
     // 和摇杆一样铺满 int8：-128（反向到底）~ 127（正向到底）。
     final nx = x.clamp(-128.0, 127.0).toDouble();
     final ny = y.clamp(-128.0, 127.0).toDouble();
-    final same = (ble.sliderA - nx).abs() < .01 && (ble.sliderB - ny).abs() < .01;
+    final same = (ble.touchX - nx).abs() < .01 && (ble.touchY - ny).abs() < .01;
     if (same && !force) return;
-    ble.updateControls(sliderA: nx, sliderB: ny);
+    ble.updateControls(touchX: nx, touchY: ny);
 
     final now = DateTime.now();
     if (!force && now.difference(_lastScrub).inMilliseconds < 50) return;
@@ -266,23 +269,30 @@ class _ControlBoardState extends State<ControlBoard> {
       ble.sendPacketNow();
       return;
     }
-    // 独立模式：只发变化的那一轴，省一半无线写入。
+    // 独立模式：一对搓动值发一条 touch 指令，值没变就不重复发。
     final rx = x.round();
     final ry = y.round();
-    if (force || rx != _lastScrubX) {
-      _lastScrubX = rx;
-      _sendAxis('slider1', rx);
-    }
-    if (force || ry != _lastScrubY) {
-      _lastScrubY = ry;
-      _sendAxis('slider2', ry);
-    }
+    if (!force && rx == _lastScrubX && ry == _lastScrubY) return;
+    _lastScrubX = rx;
+    _lastScrubY = ry;
+    _sendCommand('touch', vars: {'tx': '$rx', 'ty': '$ry'});
   }
 
-  /// 轴指令：文本模式发带符号值，HEX 模式发 +128 后的单字节。
-  void _sendAxis(String key, int value) {
-    final shifted = widget.ble.command(key).hex ? value + 128 : value;
-    _sendCommand(key, vars: {'v': '$shifted'});
+  /// 滑条：绝对值 0~100，独立模式发 slider1 / slider2。
+  void _onSlider(String key, double value, {bool force = false}) {
+    if (key == 'slider1') {
+      widget.ble.updateControls(sliderA: value);
+    } else {
+      widget.ble.updateControls(sliderB: value);
+    }
+    final now = DateTime.now();
+    if (!force && now.difference(_lastSlider).inMilliseconds < 80) return;
+    _lastSlider = now;
+    if (widget.ble.controlMode == ControlSendMode.single) {
+      _sendCommand(key, vars: {'v': '${value.round()}'});
+    } else if (force) {
+      widget.ble.sendPacketNow();
+    }
   }
 
   void _beginScrub(Offset local) {
@@ -367,21 +377,20 @@ class _ControlBoardState extends State<ControlBoard> {
     }
   }
 
-  /// 停止：摇杆回中 + 搓动轴归零 + 清空按键状态，再发一次。
+  /// 停止：摇杆回中 + 搓动归零 + 清空按键状态，再发一次。
   void _stopAll() {
     _lastScrubX = 1 << 30;
     _lastScrubY = 1 << 30;
     widget.ble.updateControls(
       joyX: 0,
       joyY: 0,
-      sliderA: 0,
-      sliderB: 0,
+      touchX: 0,
+      touchY: 0,
       pressed: {},
     );
     if (widget.ble.controlMode == ControlSendMode.single) {
       _sendCommand('stop');
-      _sendAxis('slider1', 0);
-      _sendAxis('slider2', 0);
+      _sendCommand('touch', vars: {'tx': '0', 'ty': '0'});
     } else {
       widget.ble.sendPacketNow();
     }
@@ -434,29 +443,9 @@ class _ControlBoardState extends State<ControlBoard> {
           children: [
             SizedBox(
               width: joy + 10,
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  Expanded(
-                    child: FittedBox(
-                      fit: BoxFit.scaleDown,
-                      alignment: Alignment.bottomCenter,
-                      child: SizedBox(
-                        width: 138,
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            _axisCard('X', widget.ble.sliderA),
-                            const SizedBox(height: 4),
-                            _axisCard('Y', widget.ble.sliderB),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  SizedBox(width: joy, height: joy, child: _joystick()),
-                ],
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                child: SizedBox(width: joy, height: joy, child: _joystick()),
               ),
             ),
             const SizedBox(width: 6),
@@ -467,26 +456,20 @@ class _ControlBoardState extends State<ControlBoard> {
     );
   }
 
+  /// 全屏竖屏：摇杆 + 弧形键位，搓动值在顶部工具栏显示。
   Widget _tallLayout() {
-    return Column(
+    return Row(
       children: [
-        Expanded(
-          child: Row(
-            children: [
-              Expanded(flex: 5, child: _joystick()),
-              const SizedBox(width: 12),
-              Expanded(flex: 6, child: _arcPadFit()),
-            ],
-          ),
-        ),
-        const SizedBox(height: 8),
-        _axisRow(),
+        Expanded(flex: 5, child: _joystick()),
+        const SizedBox(width: 12),
+        Expanded(flex: 6, child: _arcPadFit()),
       ],
     );
   }
 
-  /// 页内（非全屏）布局：左摇杆 + 右 2×3 大按键，底部显示 X / Y。
+  /// 页内（非全屏）布局：左摇杆 + 右 2×3 大按键，底部两条滑条。
   Widget _compactLayout() {
+    final ble = widget.ble;
     return Column(
       children: [
         Expanded(
@@ -498,24 +481,15 @@ class _ControlBoardState extends State<ControlBoard> {
             ],
           ),
         ),
-        const SizedBox(height: 8),
-        _axisRow(),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(child: _sliderCard('slider1', 'A', ble.sliderA)),
+            const SizedBox(width: 10),
+            Expanded(child: _sliderCard('slider2', 'B', ble.sliderB)),
+          ],
+        ),
       ],
-    );
-  }
-
-  /// 原来两条滑条的位置：只显示搓出来的 X / Y。
-  Widget _axisRow({double height = 52}) {
-    final ble = widget.ble;
-    return SizedBox(
-      height: height,
-      child: Row(
-        children: [
-          Expanded(child: _axisCard('X', ble.sliderA)),
-          const SizedBox(width: 10),
-          Expanded(child: _axisCard('Y', ble.sliderB)),
-        ],
-      ),
     );
   }
 
@@ -580,6 +554,11 @@ class _ControlBoardState extends State<ControlBoard> {
               color: AppColors.textDim,
             ),
           ),
+        ],
+        // 搓动值只在全屏时挂在这里：紧挨着「整包」开关的右边。
+        if (widget.fullscreen) ...[
+          const SizedBox(width: 8),
+          _touchReadout(),
         ],
         const SizedBox(width: 10),
         Expanded(child: _feedback()),
@@ -799,49 +778,90 @@ class _ControlBoardState extends State<ControlBoard> {
     _sendCommand(key);
   }
 
-  /// A / B 原来的位置：只显示当前搓出来的那一轴数值，长按可改指令。
-  Widget _axisCard(String axis, double value) {
-    final moved = value.abs() >= .5;
-    final digits = moved ? '${value > 0 ? '+' : ''}${value.round()}' : '0';
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onLongPress: () => showCommandEditor(
-        context,
-        widget.ble,
-        axis == 'X' ? 'slider1' : 'slider2',
+  /// 滑条 A / B：绝对值 0~100，长按标签改指令。
+  Widget _sliderCard(String key, String tag, double value) {
+    final command = widget.ble.command(key);
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 6, 10, 2),
+      decoration: BoxDecoration(
+        color: AppColors.surface.withValues(alpha: .85),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.stroke),
       ),
-      child: Container(
-        height: 44,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        decoration: BoxDecoration(
-          color: AppColors.surface.withValues(alpha: .85),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: moved ? AppColors.accent.withValues(alpha: .5) : AppColors.stroke,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          GestureDetector(
+            onLongPress: () => showCommandEditor(context, widget.ble, key),
+            child: Row(
+              children: [
+                MiniTag(label: tag, color: AppColors.accent),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    command.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 10.5, color: AppColors.textDim),
+                  ),
+                ),
+                Text(
+                  '${value.round()}',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                    color: AppColors.accent,
+                  ),
+                ),
+              ],
+            ),
           ),
+          SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 3,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+              activeTrackColor: AppColors.accent,
+              inactiveTrackColor: AppColors.stroke,
+              thumbColor: AppColors.accent,
+              overlayColor: AppColors.accent.withValues(alpha: .15),
+            ),
+            child: Slider(
+              value: value.clamp(0, 100),
+              max: 100,
+              onChanged: (v) => _onSlider(key, v),
+              // 松手时补发最后一帧，避免节流把终值丢掉。
+              onChangeEnd: (v) => _onSlider(key, v, force: true),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 全屏时才出现：搓动值挂在工具栏「整包」右边。
+  Widget _touchReadout() {
+    final ble = widget.ble;
+    final active = ble.touchX.abs() >= .5 || ble.touchY.abs() >= .5;
+    String fmt(double v) =>
+        v.abs() < .5 ? '0' : '${v > 0 ? '+' : ''}${v.round()}';
+    final color = active ? AppColors.accent : AppColors.textDim;
+    return GestureDetector(
+      onLongPress: () => showCommandEditor(context, widget.ble, 'touch'),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: .1),
+          borderRadius: BorderRadius.circular(9),
+          border: Border.all(color: color.withValues(alpha: .3)),
         ),
-        child: Row(
-          children: [
-            Text(
-              axis,
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w800,
-                color: moved ? AppColors.accent : AppColors.textDim,
-              ),
-            ),
-            const Spacer(),
-            Text(
-              digits,
-              style: TextStyle(
-                fontSize: 17,
-                height: 1.1,
-                fontWeight: FontWeight.w700,
-                fontFamily: 'monospace',
-                color: moved ? AppColors.accent : AppColors.textDim,
-              ),
-            ),
-          ],
+        child: Text(
+          'X ${fmt(ble.touchX)}  Y ${fmt(ble.touchY)}',
+          style: TextStyle(
+            fontSize: 9.5,
+            fontFamily: 'monospace',
+            color: color,
+          ),
         ),
       ),
     );
@@ -1200,6 +1220,7 @@ class _ControlSettingsSheetState extends State<ControlSettingsSheet> {
     'k6',
     'slider1',
     'slider2',
+    'touch',
     'joystick',
   ];
 
@@ -1363,8 +1384,8 @@ class _ControlSettingsSheetState extends State<ControlSettingsSheet> {
               const SizedBox(height: 8),
               Text(
                 ble.packetHex
-                    ? '{x}/{y}：int8 -128~127，HEX 里写 +128 后的 0~255；{s1}/{s2}：0~100；{btn}：6 位按键位图（k1 起低位）；{k1}~{k6}：0/1'
-                    : '{x}/{y}：-128~127；{s1}/{s2}：0~100；{btn}：6 位按键位图（k1 起低位）；{k1}~{k6}：0/1',
+                    ? '{x}/{y}：摇杆 int8 -128~127；{s1}/{s2}：滑条 0~100；{tx}/{ty}：搓动 int8 -128~127（HEX 里都 +128 成 0~255）；{btn}：6 位按键位图（k1 起低位）；{k1}~{k6}：0/1'
+                    : '{x}/{y}：摇杆 -128~127；{s1}/{s2}：滑条 0~100；{tx}/{ty}：搓动 -128~127；{btn}：6 位按键位图（k1 起低位）；{k1}~{k6}：0/1',
                 style: const TextStyle(fontSize: 10.5, height: 1.6, color: AppColors.textDim),
               ),
             ],
@@ -1538,9 +1559,11 @@ Future<void> showCommandEditor(
                 decoration: InputDecoration(
                   hintText: key == 'joystick'
                       ? '例如 AA 55 {x} {y} 55 AA'
-                      : key.startsWith('slider')
-                          ? '例如 AA 55 {v} 55 AA'
-                          : '例如 AA 01 01',
+                      : key == 'touch'
+                          ? '例如 AA 55 {tx} {ty} 55 AA'
+                          : key.startsWith('slider')
+                              ? '例如 AA 55 {v} 55 AA'
+                              : '例如 AA 01 01',
                 ),
               ),
               const SizedBox(height: 4),
@@ -1566,9 +1589,11 @@ Future<void> showCommandEditor(
               Text(
                 key == 'joystick'
                     ? '可用变量：{x} {y}（-128 ~ 127，HEX 时 +128 转成单字节 0~255）'
-                    : key.startsWith('slider')
-                        ? '可用变量：{v}（0 ~ 100）'
-                        : '内容原样发送；HEX 模式支持 AA 55 这种写法',
+                    : key == 'touch'
+                        ? '可用变量：{tx} {ty}（-128 ~ 127，0 = 没搓，HEX 时 +128）'
+                        : key.startsWith('slider')
+                            ? '可用变量：{v}（0 ~ 100）'
+                            : '内容原样发送；HEX 模式支持 AA 55 这种写法',
                 style: const TextStyle(fontSize: 10.5, color: AppColors.textDim),
               ),
               if (hex)

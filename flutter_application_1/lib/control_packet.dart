@@ -20,6 +20,8 @@ const List<String> packetTokens = [
   'y',
   's1',
   's2',
+  'tx',
+  'ty',
   'btn',
   'k1',
   'k2',
