@@ -93,16 +93,25 @@ class JustFloatParser {
 }
 
 /// 滚动示波器曲线。
+///
+/// [viewFrames] 控制横向看多少帧（双指缩放），[zoomY] / [offsetY]
+/// 控制纵向放大与平移，点「自适应」时两者回到 1 / 0。
 class WaveChartPainter extends CustomPainter {
   WaveChartPainter({
     required this.frames,
     required this.channelCount,
     required this.visible,
+    this.viewFrames = 420,
+    this.zoomY = 1,
+    this.offsetY = 0,
   });
 
   final List<List<double>> frames;
   final int channelCount;
   final Set<int> visible;
+  final double viewFrames;
+  final double zoomY;
+  final double offsetY;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -120,9 +129,14 @@ class WaveChartPainter extends CustomPainter {
 
     if (frames.isEmpty || channelCount == 0) return;
 
+    // 只画窗口内最近的 N 帧：双指放大 = 少画几帧，帧距自然拉开。
+    final count = math.min(frames.length, math.max(2, viewFrames.round()));
+    final first = frames.length - count;
+
     var minV = double.infinity;
     var maxV = -double.infinity;
-    for (final frame in frames) {
+    for (var i = first; i < frames.length; i++) {
+      final frame = frames[i];
       for (var ch = 0; ch < channelCount; ch++) {
         if (!visible.contains(ch) || ch >= frame.length) continue;
         final v = frame[ch];
@@ -138,10 +152,17 @@ class WaveChartPainter extends CustomPainter {
     final pad = (maxV - minV) * .1;
     minV -= pad;
     maxV += pad;
-    final span = maxV - minV;
+
+    // 自适应范围之上再叠手势的缩放 / 上下平移。
+    var span = maxV - minV;
+    final center = (minV + maxV) / 2 + offsetY * span;
+    final half = span / 2 / math.max(zoomY, .01);
+    minV = center - half;
+    maxV = center + half;
+    span = maxV - minV;
 
     // 数据从右侧进入，满窗后向左滚动。
-    final step = size.width / (JustFloatParser.maxFrames - 1);
+    final step = size.width / math.max(1, count - 1);
     for (var ch = 0; ch < channelCount; ch++) {
       if (!visible.contains(ch)) continue;
       final paint = Paint()
@@ -152,7 +173,7 @@ class WaveChartPainter extends CustomPainter {
         ..isAntiAlias = true;
       final path = Path();
       var started = false;
-      for (var i = 0; i < frames.length; i++) {
+      for (var i = first; i < frames.length; i++) {
         final frame = frames[i];
         if (ch >= frame.length) continue;
         final x = size.width - (frames.length - 1 - i) * step;

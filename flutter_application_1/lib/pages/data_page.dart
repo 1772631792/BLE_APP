@@ -26,6 +26,27 @@ class _DataPageState extends State<DataPage> {
   bool _paused = false;
   List<List<double>>? _frozen;
 
+  // 波形视图：横向窗口帧数 + 纵向缩放 / 平移（双指缩放、单指拖动）。
+  double _viewFrames = 420;
+  double _zoomY = 1;
+  double _offsetY = 0;
+  double _baseViewFrames = 420;
+  double _baseZoomY = 1;
+
+  static const double _maxFrames = 420;
+  static const double _minFrames = 40;
+
+  bool get _fitted =>
+      _viewFrames >= _maxFrames && (_zoomY - 1).abs() < .001 && _offsetY.abs() < .001;
+
+  void _fitView() {
+    setState(() {
+      _viewFrames = _maxFrames;
+      _zoomY = 1;
+      _offsetY = 0;
+    });
+  }
+
   @override
   void dispose() {
     _input.dispose();
@@ -388,15 +409,38 @@ class _DataPageState extends State<DataPage> {
             child: Stack(
               children: [
                 Positioned.fill(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(4, 20, 4, 8),
-                    child: CustomPaint(
-                      painter: WaveChartPainter(
-                        frames: frames,
-                        channelCount: channels,
-                        visible: visible,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onScaleStart: (_) {
+                      _baseViewFrames = _viewFrames;
+                      _baseZoomY = _zoomY;
+                    },
+                    onScaleUpdate: (details) {
+                      setState(() {
+                        // 双指：同时缩放时间窗与幅值；单指：只上下平移。
+                        if (details.pointerCount >= 2) {
+                          final scale = details.scale.clamp(.5, 4.0);
+                          _viewFrames = (_baseViewFrames / scale)
+                              .clamp(_minFrames, _maxFrames);
+                          _zoomY = (_baseZoomY * scale).clamp(.2, 20.0);
+                        }
+                        _offsetY = (_offsetY + details.focalPointDelta.dy / 240)
+                            .clamp(-8.0, 8.0);
+                      });
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(4, 20, 4, 8),
+                      child: CustomPaint(
+                        painter: WaveChartPainter(
+                          frames: frames,
+                          channelCount: channels,
+                          visible: visible,
+                          viewFrames: _viewFrames,
+                          zoomY: _zoomY,
+                          offsetY: _offsetY,
+                        ),
+                        size: Size.infinite,
                       ),
-                      size: Size.infinite,
                     ),
                   ),
                 ),
@@ -406,7 +450,9 @@ class _DataPageState extends State<DataPage> {
                   child: Text(
                     frames.isEmpty
                         ? 'JUSTFLOAT'
-                        : '${frames.length} 帧 · $channels CH${_paused ? ' · 已暂停' : ''}',
+                        : '${frames.length} 帧 · $channels CH'
+                            '${_fitted ? '' : ' · ${_viewFrames.round()}F ×${_zoomY.toStringAsFixed(1)}'}'
+                            '${_paused ? ' · 已暂停' : ''}',
                     style: const TextStyle(
                       fontSize: 9.5,
                       letterSpacing: .8,
@@ -420,6 +466,23 @@ class _DataPageState extends State<DataPage> {
                   top: 0,
                   child: Row(
                     children: [
+                      IconButton(
+                        tooltip: '自适应',
+                        onPressed: _fitted ? null : _fitView,
+                        icon: Icon(
+                          Icons.center_focus_strong_rounded,
+                          size: 18,
+                          color: _fitted
+                              ? AppColors.textDim.withValues(alpha: .4)
+                              : AppColors.accent,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: '选择通道',
+                        onPressed:
+                            channels == 0 ? null : () => _showChannelPicker(channels),
+                        icon: const Icon(Icons.checklist_rounded, size: 18),
+                      ),
                       IconButton(
                         tooltip: _paused ? '继续' : '暂停',
                         onPressed: _togglePause,
@@ -468,6 +531,133 @@ class _DataPageState extends State<DataPage> {
     );
   }
 
+  /// 通道勾选面板：点右上角「选择通道」或长按图例打开，等价于 VOFA+ 的右键菜单。
+  Future<void> _showChannelPicker(int channels) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            void toggle(int index) {
+              setState(() {
+                if (!_hidden.remove(index)) _hidden.add(index);
+              });
+              setSheetState(() {});
+            }
+
+            final shown = channels - _hidden.length;
+            return Container(
+              margin: const EdgeInsets.all(12),
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+              decoration: BoxDecoration(
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(22),
+                border: Border.all(color: AppColors.stroke),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Text(
+                        '选择通道',
+                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+                      ),
+                      const Spacer(),
+                      Text(
+                        '已选 $shown / $channels',
+                        style: const TextStyle(fontSize: 11, color: AppColors.textDim),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    '勾选要画的变量；长按下方图例也能打开这里',
+                    style: TextStyle(fontSize: 10.5, color: AppColors.textDim),
+                  ),
+                  const SizedBox(height: 6),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 300),
+                    child: SingleChildScrollView(
+                      child: Column(
+                        children: [
+                          for (var i = 0; i < channels; i++)
+                            CheckboxListTile(
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                              visualDensity: VisualDensity.compact,
+                              controlAffinity: ListTileControlAffinity.leading,
+                              activeColor: channelColor(i),
+                              value: !_hidden.contains(i),
+                              onChanged: (_) => toggle(i),
+                              title: Row(
+                                children: [
+                                  Container(
+                                    width: 8,
+                                    height: 8,
+                                    decoration: BoxDecoration(
+                                      color: channelColor(i),
+                                      shape: BoxShape.circle,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    'CH${i + 1}',
+                                    style: TextStyle(
+                                      fontSize: 12.5,
+                                      fontWeight: FontWeight.w600,
+                                      fontFamily: 'monospace',
+                                      color: _hidden.contains(i)
+                                          ? AppColors.textDim
+                                          : AppColors.text,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  Row(
+                    children: [
+                      TextButton(
+                        onPressed: () {
+                          setState(() => _hidden.clear());
+                          setSheetState(() {});
+                        },
+                        child: const Text('全选'),
+                      ),
+                      TextButton(
+                        onPressed: () {
+                          setState(() {
+                            _hidden
+                              ..clear()
+                              ..addAll(List<int>.generate(channels, (i) => i));
+                          });
+                          setSheetState(() {});
+                        },
+                        child: const Text('全不选'),
+                      ),
+                      const Spacer(),
+                      FilledButton(
+                        onPressed: () => Navigator.of(ctx).pop(),
+                        child: const Text('完成'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   Widget _legend(List<List<double>> frames, int channels) {
     if (channels == 0) {
       return Panel(
@@ -490,21 +680,25 @@ class _DataPageState extends State<DataPage> {
     }
 
     final last = frames.isEmpty ? null : frames.last;
-    return Panel(
-      margin: EdgeInsets.zero,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-      radius: 16,
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: [
-          for (var i = 0; i < channels; i++)
-            _channelChip(
-              index: i,
-              value: (last != null && i < last.length) ? last[i] : null,
-              hidden: _hidden.contains(i),
-            ),
-        ],
+    return GestureDetector(
+      // 长按整条图例 = 打开通道勾选面板。
+      onLongPress: () => _showChannelPicker(channels),
+      child: Panel(
+        margin: EdgeInsets.zero,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+        radius: 16,
+        child: Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (var i = 0; i < channels; i++)
+              _channelChip(
+                index: i,
+                value: (last != null && i < last.length) ? last[i] : null,
+                hidden: _hidden.contains(i),
+              ),
+          ],
+        ),
       ),
     );
   }

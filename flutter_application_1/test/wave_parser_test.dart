@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flutter_application_1/wave.dart';
@@ -30,5 +32,24 @@ void main() {
     parser.clear();
     expect(parser.frames.isEmpty, isTrue);
     expect(parser.channelCount, 0);
+  });
+
+  test('JustFloat 多通道：一帧 4 个变量一起解析', () {
+    final parser = JustFloatParser();
+    final data = <int>[];
+    for (final value in [1.0, -2.0, 3.5, 0.25]) {
+      final bytes = ByteData(4)..setFloat32(0, value, Endian.little);
+      data.addAll(bytes.buffer.asUint8List());
+    }
+    data.addAll(JustFloatParser.terminator);
+
+    parser.feed(data);
+    expect(parser.frames.length, 1);
+    expect(parser.channelCount, 4);
+    expect(parser.frames.single.length, 4);
+    expect(parser.frames.single[0], closeTo(1.0, 1e-6));
+    expect(parser.frames.single[1], closeTo(-2.0, 1e-6));
+    expect(parser.frames.single[2], closeTo(3.5, 1e-6));
+    expect(parser.frames.single[3], closeTo(0.25, 1e-6));
   });
 }
