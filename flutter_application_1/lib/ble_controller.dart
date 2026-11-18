@@ -85,6 +85,8 @@ class BleController extends ChangeNotifier {
     'k2': const ControlCommand(label: '按键2', payload: '2'),
     'k3': const ControlCommand(label: '按键3', payload: '3'),
     'k4': const ControlCommand(label: '按键4', payload: '4'),
+    'k5': const ControlCommand(label: '恢复', payload: '5'),
+    'k6': const ControlCommand(label: '回城', payload: '6'),
     'slider1': const ControlCommand(label: '滑条 A', payload: '{v}'),
     'slider2': const ControlCommand(label: '滑条 B', payload: '{v}'),
     'joystick': const ControlCommand(label: '摇杆', payload: '{x},{y}'),
@@ -102,6 +104,8 @@ class BleController extends ChangeNotifier {
   Set<String> _pressedKeys = {};
   String? _lastSentPreview;
   String? _lastPacketError;
+  String? _lastTxLogPreview;
+  DateTime _lastTxLogAt = DateTime.fromMillisecondsSinceEpoch(0);
   Timer? _packetTimer;
 
   StreamSubscription<List<ScanResult>>? _scanSub;
@@ -808,7 +812,7 @@ class BleController extends ChangeNotifier {
       await channel.write(bytes, withoutResponse: withoutResponse);
       _txCount += bytes.length;
       _lastSentPreview = preview;
-      _log('TX ${bytes.length}B  $preview', LogKind.tx);
+      _logTx(bytes.length, preview, silent: silent);
       return true;
     } catch (e) {
       if (silent) {
@@ -956,16 +960,21 @@ class BleController extends ChangeNotifier {
 
   int get pressedBitmap {
     var bitmap = 0;
-    for (var i = 1; i <= 4; i++) {
+    for (var i = 1; i <= 6; i++) {
       if (_pressedKeys.contains('k$i')) bitmap |= 1 << (i - 1);
     }
     return bitmap;
   }
 
+  /// 摇杆输出的有符号单字节值：-128 ~ 127，正好铺满一个字节。
+  int get joyXInt => (_joyX * 127).round().clamp(-128, 127);
+  int get joyYInt => (_joyY * 127).round().clamp(-128, 127);
+
   Map<String, int> _packetIntValues() {
     return {
-      'x': ((_joyX * 100).round() + 100).clamp(0, 200),
-      'y': ((_joyY * 100).round() + 100).clamp(0, 200),
+      // HEX 里用 int8 的补码形式：-128~127 + 128 → 0~255
+      'x': (joyXInt + 128).clamp(0, 255),
+      'y': (joyYInt + 128).clamp(0, 255),
       's1': _sliderA.round().clamp(0, 100),
       's2': _sliderB.round().clamp(0, 100),
       'btn': pressedBitmap,
@@ -973,14 +982,16 @@ class BleController extends ChangeNotifier {
       'k2': _pressedKeys.contains('k2') ? 1 : 0,
       'k3': _pressedKeys.contains('k3') ? 1 : 0,
       'k4': _pressedKeys.contains('k4') ? 1 : 0,
+      'k5': _pressedKeys.contains('k5') ? 1 : 0,
+      'k6': _pressedKeys.contains('k6') ? 1 : 0,
     };
   }
 
   Map<String, String> _packetTextValues() {
     final ints = _packetIntValues();
     return {
-      'x': '${(_joyX * 100).round()}',
-      'y': '${(_joyY * 100).round()}',
+      'x': '$joyXInt',
+      'y': '$joyYInt',
       's1': '${ints['s1']}',
       's2': '${ints['s2']}',
       'btn': '${ints['btn']}',
@@ -988,6 +999,8 @@ class BleController extends ChangeNotifier {
       'k2': '${ints['k2']}',
       'k3': '${ints['k3']}',
       'k4': '${ints['k4']}',
+      'k5': '${ints['k5']}',
+      'k6': '${ints['k6']}',
     };
   }
 
@@ -1117,6 +1130,18 @@ class BleController extends ChangeNotifier {
       normalized.length ~/ 2,
       (i) => int.parse(normalized.substring(i * 2, i * 2 + 2), radix: 16),
     );
+  }
+
+  /// 整包按周期发送，全量记日志会刷屏：内容没变就不记，变化时最多约 8 条/秒。
+  void _logTx(int length, String preview, {required bool silent}) {
+    final now = DateTime.now();
+    if (silent) {
+      if (preview == _lastTxLogPreview) return;
+      if (now.difference(_lastTxLogAt).inMilliseconds < 120) return;
+    }
+    _lastTxLogAt = now;
+    _lastTxLogPreview = preview;
+    _log('TX ${length}B  $preview', LogKind.tx);
   }
 
   void _log(String message, LogKind kind) {

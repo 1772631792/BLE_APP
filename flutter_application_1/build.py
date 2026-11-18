@@ -1,3 +1,9 @@
+"""一键打包：先把 图标.png 同步成 Android 启动图标，再编译 APK。
+
+用法：
+    python build.py
+"""
+
 import re
 import shutil
 import subprocess
@@ -16,6 +22,22 @@ FLUTTER = r"D:\flutter\bin\flutter.bat"
 
 # 产物输出目录（相对工程根目录）
 DIST_DIR = "dist"
+
+# 图标源，按顺序找第一个存在的
+ICON_SOURCES = (
+    PROJECT_DIR / "图标.png",
+    PROJECT_DIR.parent / "图标.png",
+    PROJECT_DIR / "assets" / "icon.png",
+)
+
+# Android 各密度启动图标的边长（dp）
+MIPMAP_SIZES = {
+    "mdpi": 48,
+    "hdpi": 72,
+    "xhdpi": 96,
+    "xxhdpi": 144,
+    "xxxhdpi": 192,
+}
 
 
 def read_version() -> str:
@@ -39,6 +61,62 @@ def human_size(num_bytes: int) -> str:
     return f"{size:.1f}GB"
 
 
+def find_icon_source() -> Path | None:
+    for path in ICON_SOURCES:
+        if path.is_file():
+            return path
+    return None
+
+
+def sync_icons() -> None:
+    """把 图标.png 转成 mipmap 各密度 PNG（Android 不认 .ico）。
+
+    原图卡片外的四角是纯黑背景，从四角泛洪成透明并内缩 2px，
+    缩小后才不会出现黑角 / 黑边。
+    """
+    source = find_icon_source()
+    if source is None:
+        print("提示：没找到 图标.png，跳过图标更新，沿用现有 res/mipmap 图标\n")
+        return
+
+    try:
+        from PIL import Image, ImageDraw, ImageFilter
+    except ImportError:
+        print("提示：没装 Pillow，跳过图标更新（pip install pillow）\n")
+        return
+
+    print(f"更新应用图标：{source}")
+
+    base = Image.open(source).convert("RGBA")
+    side = min(base.size)
+    if base.size != (side, side):
+        left = (base.width - side) // 2
+        top = (base.height - side) // 2
+        base = base.crop((left, top, left + side, top + side))
+
+    icon = base.copy()
+    width, height = icon.size
+    for corner in ((0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)):
+        ImageDraw.floodfill(icon, corner, (0, 0, 0, 0), thresh=60)
+
+    red, green, blue, alpha = icon.split()
+    icon = Image.merge("RGBA", (red, green, blue, alpha.filter(ImageFilter.MinFilter(5))))
+
+    res_dir = PROJECT_DIR / "android" / "app" / "src" / "main" / "res"
+    for density, px in MIPMAP_SIZES.items():
+        target = res_dir / f"mipmap-{density}" / "ic_launcher.png"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        icon.resize((px, px), Image.LANCZOS).save(target, optimize=True)
+        print(f"  mipmap-{density}/ic_launcher.png  {px}x{px}")
+
+    ico = source.with_suffix(".ico")
+    icon.save(
+        ico,
+        sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+    )
+    print(f"  同时导出 {ico}\n")
+
+
 def main() -> None:
     if not (PROJECT_DIR / "pubspec.yaml").exists():
         print("错误：找不到 pubspec.yaml，不是 Flutter 工程目录")
@@ -48,8 +126,10 @@ def main() -> None:
 
     print(f"工程目录：{PROJECT_DIR}")
     print(f"版本号：{read_version()}")
-    print("开始编译 Android APK...\n")
 
+    sync_icons()
+
+    print("开始编译 Android APK...\n")
     result = subprocess.run(
         [flutter, "build", "apk", "--release"],
         cwd=str(PROJECT_DIR),

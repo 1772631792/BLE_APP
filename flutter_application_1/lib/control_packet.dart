@@ -25,6 +25,8 @@ const List<String> packetTokens = [
   'k2',
   'k3',
   'k4',
+  'k5',
+  'k6',
 ];
 
 /// 按 HEX 模板组包：字面量按十六进制解析，占位符输出 1 字节（0~255）。
