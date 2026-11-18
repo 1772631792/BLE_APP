@@ -247,8 +247,9 @@ class _ControlBoardState extends State<ControlBoard> {
   /// 空白处搓动：把位移分解成 X / Y 两个轴，没搓时就是 0 / 0。
   void _onScrub(double x, double y, {bool force = false}) {
     final ble = widget.ble;
-    final nx = x.clamp(-100.0, 100.0).toDouble();
-    final ny = y.clamp(-100.0, 100.0).toDouble();
+    // 和摇杆一样铺满 int8：-128（反向到底）~ 127（正向到底）。
+    final nx = x.clamp(-128.0, 127.0).toDouble();
+    final ny = y.clamp(-128.0, 127.0).toDouble();
     final same = (ble.sliderA - nx).abs() < .01 && (ble.sliderB - ny).abs() < .01;
     if (same && !force) return;
     ble.updateControls(sliderA: nx, sliderB: ny);
@@ -301,8 +302,8 @@ class _ControlBoardState extends State<ControlBoard> {
     setState(() => _scrubNow = local);
     final delta = local - start;
     _onScrub(
-      delta.dx / (size.width * _scrubTravel) * 100,
-      -delta.dy / (size.height * _scrubTravel) * 100,
+      delta.dx / (size.width * _scrubTravel) * 128,
+      -delta.dy / (size.height * _scrubTravel) * 128,
     );
   }
 

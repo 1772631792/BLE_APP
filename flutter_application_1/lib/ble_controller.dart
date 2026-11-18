@@ -963,8 +963,9 @@ class BleController extends ChangeNotifier {
   }) {
     if (joyX != null) _joyX = joyX.clamp(-1.0, 1.0).toDouble();
     if (joyY != null) _joyY = joyY.clamp(-1.0, 1.0).toDouble();
-    if (sliderA != null) _sliderA = sliderA.clamp(0.0, 100.0).toDouble();
-    if (sliderB != null) _sliderB = sliderB.clamp(0.0, 100.0).toDouble();
+    // 搓动轴是有符号的：反向搓必须是负数，不能夹到 0。
+    if (sliderA != null) _sliderA = sliderA.clamp(-128.0, 127.0).toDouble();
+    if (sliderB != null) _sliderB = sliderB.clamp(-128.0, 127.0).toDouble();
     if (pressed != null) _pressedKeys = pressed;
     _notify();
   }
@@ -981,14 +982,18 @@ class BleController extends ChangeNotifier {
   int get joyXInt => (_joyX * 127).round().clamp(-128, 127);
   int get joyYInt => (_joyY * 127).round().clamp(-128, 127);
 
+  /// 搓动轴同样是有符号单字节：反向搓是负数，0 表示没搓。
+  int get scrubXInt => _sliderA.round().clamp(-128, 127);
+  int get scrubYInt => _sliderB.round().clamp(-128, 127);
+
   Map<String, int> _packetIntValues() {
     return {
       // HEX 里用 int8 的补码形式：-128~127 + 128 → 0~255
       'x': (joyXInt + 128).clamp(0, 255),
       'y': (joyYInt + 128).clamp(0, 255),
-      // 搓动轴是 -100~100，wire 上压成 0~100，50 = 没搓。
-      's1': ((_sliderA + 100) / 2).round().clamp(0, 100),
-      's2': ((_sliderB + 100) / 2).round().clamp(0, 100),
+      // 搓动轴和摇杆一样是 int8：HEX 里 +128 成 0~255，包长不变。
+      's1': (scrubXInt + 128).clamp(0, 255),
+      's2': (scrubYInt + 128).clamp(0, 255),
       'btn': pressedBitmap,
       'k1': _pressedKeys.contains('k1') ? 1 : 0,
       'k2': _pressedKeys.contains('k2') ? 1 : 0,
@@ -1004,8 +1009,8 @@ class BleController extends ChangeNotifier {
     return {
       'x': '$joyXInt',
       'y': '$joyYInt',
-      's1': '${ints['s1']}',
-      's2': '${ints['s2']}',
+      's1': '$scrubXInt',
+      's2': '$scrubYInt',
       'btn': '${ints['btn']}',
       'k1': '${ints['k1']}',
       'k2': '${ints['k2']}',
