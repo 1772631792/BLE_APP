@@ -130,6 +130,7 @@ class BleController extends ChangeNotifier {
   StreamSubscription<BluetoothConnectionState>? _connSub;
   Timer? _keepAliveTimer;
   Timer? _scanWatchdog;
+  Timer? _scanFallbackTimer;
   Timer? _reconnectTimer;
 
   BluetoothDevice? _device;
@@ -146,13 +147,18 @@ class BleController extends ChangeNotifier {
   String? _lastError;
   String? _lastConnectError;
   String? _lastConnectedId;
+  // 跨启动记住的设备：重开 App 时不靠扫描，直接用地址连回去。
+  String? _lastDeviceId;
+  String? _lastDeviceName;
   bool _scanning = false;
   bool _autoReconnect = true;
   bool _keepAlive = true;
   bool _hexSend = false;
   bool _hexReceive = false;
-  bool _autoOpenTerminal = true;
+  bool _autoOpenControls = true;
+  bool _autoConnectLast = true;
   bool _reconnecting = false;
+  bool _launchConnectStarted = false;
   bool _disposed = false;
   int _reconnectAttempt = 0;
   int _txCount = 0;
@@ -177,6 +183,9 @@ class BleController extends ChangeNotifier {
   String? get lastError => _lastError;
   int get errorSerial => _errorSerial;
   String? get lastConnectedId => _lastConnectedId;
+  String? get lastDeviceId => _lastDeviceId;
+  String? get lastDeviceName => _lastDeviceName;
+  bool get autoConnectLast => _autoConnectLast;
 
   List<List<double>> get waveFrames => _wave.frames;
   int get waveChannelCount => _wave.channelCount;
@@ -202,7 +211,7 @@ class BleController extends ChangeNotifier {
   bool get connected => _phase == LinkPhase.connected;
   bool get autoReconnect => _autoReconnect;
   bool get keepAlive => _keepAlive;
-  bool get autoOpenTerminal => _autoOpenTerminal;
+  bool get autoOpenControls => _autoOpenControls;
   int get connectedSerial => _connectedSerial;
   bool get hexSend => _hexSend;
   bool get hexReceive => _hexReceive;
@@ -233,6 +242,8 @@ class BleController extends ChangeNotifier {
     _adapter = FlutterBluePlus.adapterStateNow;
     _log('BLE Studio 已启动', LogKind.system);
     _notify();
+    // 启动时不扫描，直接连上次的设备地址（默认开启）。
+    unawaited(_connectLastOnLaunch());
   }
 
   @override
@@ -242,6 +253,7 @@ class BleController extends ChangeNotifier {
     _keepAliveTimer?.cancel();
     _packetTimer?.cancel();
     _scanWatchdog?.cancel();
+    _scanFallbackTimer?.cancel();
     _reconnectTimer?.cancel();
     _scanSub?.cancel();
     _scanningSub?.cancel();
@@ -298,12 +310,25 @@ class BleController extends ChangeNotifier {
       _scanWatchdog = Timer(duration + const Duration(seconds: 3), () {
         if (_scanning) unawaited(stopScan());
       });
+      // 兜底：设备被上一次的连接卡住时不会广播，扫描注定搜不到。
+      // 扫了 8 秒还是没有结果，就直接按保存的地址连一次。
+      _scanFallbackTimer?.cancel();
+      _scanFallbackTimer = Timer(const Duration(seconds: 8), () {
+        if (_disposed || _results.isNotEmpty) return;
+        if (_connectingId != null || _phase != LinkPhase.idle) return;
+        final id = _lastDeviceId;
+        if (id == null || id.isEmpty) return;
+        _log('扫描不到设备，尝试直连上次设备', LogKind.system);
+        unawaited(connect(BluetoothDevice.fromId(id)));
+      });
     } catch (e) {
       _fail(e);
     }
   }
 
   Future<void> stopScan() async {
+    _scanFallbackTimer?.cancel();
+    _scanFallbackTimer = null;
     try {
       await FlutterBluePlus.stopScan();
     } catch (_) {
@@ -366,6 +391,7 @@ class BleController extends ChangeNotifier {
 
       _phase = LinkPhase.connected;
       _reconnectAttempt = 0;
+      _rememberDevice(device);
       _notify();
       _log('连接成功', LogKind.system);
       await _afterConnected(device);
@@ -379,6 +405,85 @@ class BleController extends ChangeNotifier {
         _connectingId = null;
         _notify();
       }
+    }
+  }
+
+  /// 手动重连上次的设备：不扫描，直接用保存下来的地址连。
+  Future<void> connectLastDevice() async {
+    final id = _lastDeviceId;
+    if (id == null || id.isEmpty) {
+      _log('还没有可以重连的设备', LogKind.info);
+      return;
+    }
+    if (_connectingId != null || _phase == LinkPhase.connected) return;
+    try {
+      await _ensureAdapterOn();
+    } catch (e) {
+      _fail(e);
+      return;
+    }
+    await _releaseStaleConnection(id);
+    if (_disposed || _connectingId != null) return;
+    await connect(BluetoothDevice.fromId(id));
+  }
+
+  /// 启动时自动连上次的设备。
+  ///
+  /// 上次的连接如果没被设备端正确感知，设备会以为自己还连着、不再广播，
+  /// 表现就是「重进 App 扫描不到，必须给设备断电」。这里先主动断开残留连接，
+  /// 再按保存的地址直连，绕开扫描。
+  Future<void> _connectLastOnLaunch() async {
+    if (_launchConnectStarted) return;
+    final id = _lastDeviceId;
+    if (id == null || id.isEmpty) return;
+    _launchConnectStarted = true;
+    // 等首帧与蓝牙栈就绪。
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    if (_disposed || _connectingId != null || _phase == LinkPhase.connected) return;
+    // 启动时不主动弹「开启蓝牙」，留给用户手动操作。
+    if (FlutterBluePlus.adapterStateNow != BluetoothAdapterState.on) return;
+    await _releaseStaleConnection(id);
+    if (_disposed || _connectingId != null || _phase == LinkPhase.connected) return;
+    if (!_autoConnectLast) {
+      _log('已断开上次设备的残留连接，可重新扫描', LogKind.system);
+      return;
+    }
+    final name = (_lastDeviceName ?? '').trim();
+    _log('正在自动连接上次设备${name.isEmpty ? '' : '：$name'}', LogKind.system);
+    await connect(BluetoothDevice.fromId(id));
+  }
+
+  /// 断掉系统里残留在同一台设备上的连接，让它重新开始广播。
+  Future<void> _releaseStaleConnection(String id) async {
+    try {
+      final stale = FlutterBluePlus.connectedDevices
+          .where((d) => d.remoteId.str == id)
+          .toList();
+      for (final d in stale) {
+        try {
+          await d.disconnect(timeout: 5, androidDelay: 300);
+        } catch (_) {}
+      }
+      if (stale.isNotEmpty) {
+        _log('已释放上次设备的残留连接', LogKind.system);
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+      }
+    } catch (_) {
+      // 取不到系统连接列表时直接往下走。
+    }
+  }
+
+  void _rememberDevice(BluetoothDevice device) {
+    final id = device.remoteId.str;
+    var name = device.platformName.trim();
+    if (name.isEmpty) {
+      name = (_results[id]?.advertisementData.advName ?? '').trim();
+    }
+    _lastDeviceId = id;
+    if (name.isNotEmpty) _lastDeviceName = name;
+    _saveString(_kLastDeviceId, id);
+    if (_lastDeviceName != null) {
+      _saveString(_kLastDeviceName, _lastDeviceName!);
     }
   }
 
@@ -888,9 +993,14 @@ class BleController extends ChangeNotifier {
   static const String _kControlMode = 'settings.controlMode';
   static const String _kAutoReconnect = 'settings.autoReconnect';
   static const String _kKeepAlive = 'settings.keepAlive';
+  static const String _kAutoOpenControls = 'settings.autoOpenControls';
+  // 旧版 key：连上后进的是数据页，升级后沿用用户的开关值。
   static const String _kAutoOpenTerminal = 'settings.autoOpenTerminal';
   static const String _kHexSend = 'settings.hexSend';
   static const String _kHexReceive = 'settings.hexReceive';
+  static const String _kLastDeviceId = 'settings.lastDeviceId';
+  static const String _kLastDeviceName = 'settings.lastDeviceName';
+  static const String _kAutoConnectLast = 'settings.autoConnectLast';
 
   SharedPreferences? _prefs;
 
@@ -930,9 +1040,18 @@ class BleController extends ChangeNotifier {
       }
       _autoReconnect = prefs.getBool(_kAutoReconnect) ?? _autoReconnect;
       _keepAlive = prefs.getBool(_kKeepAlive) ?? _keepAlive;
-      _autoOpenTerminal = prefs.getBool(_kAutoOpenTerminal) ?? _autoOpenTerminal;
+      _autoOpenControls = prefs.getBool(_kAutoOpenControls) ??
+          prefs.getBool(_kAutoOpenTerminal) ??
+          _autoOpenControls;
       _hexSend = prefs.getBool(_kHexSend) ?? _hexSend;
       _hexReceive = prefs.getBool(_kHexReceive) ?? _hexReceive;
+      final lastId = prefs.getString(_kLastDeviceId);
+      if (lastId != null && lastId.isNotEmpty) {
+        _lastDeviceId = lastId;
+        _lastDeviceName = prefs.getString(_kLastDeviceName);
+        _lastConnectedId = lastId;
+      }
+      _autoConnectLast = prefs.getBool(_kAutoConnectLast) ?? _autoConnectLast;
 
       _log('已恢复上次保存的设置', LogKind.system);
       _notify();
@@ -1008,10 +1127,20 @@ class BleController extends ChangeNotifier {
     _notify();
   }
 
-  void setAutoOpenTerminal(bool value) {
-    _autoOpenTerminal = value;
-    _saveBool(_kAutoOpenTerminal, value);
-    _log(value ? '连接成功后自动进入数据页' : '连接成功后留在设备页', LogKind.info);
+  void setAutoOpenControls(bool value) {
+    _autoOpenControls = value;
+    _saveBool(_kAutoOpenControls, value);
+    _log(value ? '连接成功后自动进入控件页' : '连接成功后留在设备页', LogKind.info);
+  }
+
+  void setAutoConnectLast(bool value) {
+    _autoConnectLast = value;
+    _saveBool(_kAutoConnectLast, value);
+    _log(value ? '已开启：启动时自动连接上次设备' : '已关闭：启动时不自动连接', LogKind.info);
+    if (value && !_launchConnectStarted) {
+      unawaited(_connectLastOnLaunch());
+    }
+    _notify();
   }
 
   void setHexReceive(bool value) {

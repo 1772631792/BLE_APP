@@ -135,22 +135,29 @@ class _DevicesPageState extends State<DevicesPage> {
                       onChanged: ble.setAutoReconnect,
                     ),
                     TogglePill(
+                      label: '启动自动连接',
+                      icon: Icons.bolt_rounded,
+                      value: ble.autoConnectLast,
+                      onChanged: ble.setAutoConnectLast,
+                    ),
+                    TogglePill(
                       label: '心跳保活',
                       icon: Icons.favorite_rounded,
                       value: ble.keepAlive,
                       onChanged: ble.setKeepAlive,
                     ),
                     TogglePill(
-                      label: '连上后进数据页',
-                      icon: Icons.show_chart_rounded,
-                      value: ble.autoOpenTerminal,
-                      onChanged: ble.setAutoOpenTerminal,
+                      label: '连上后进控件',
+                      icon: Icons.sports_esports_outlined,
+                      value: ble.autoOpenControls,
+                      onChanged: ble.setAutoOpenControls,
                     ),
                   ],
                 ),
               ],
             ),
           ),
+          if (!ble.connected && ble.lastDeviceId != null) _LastDeviceCard(ble: ble),
           if (ble.connected) ServicesSection(ble: ble),
           if (items.isEmpty)
             Panel(
@@ -158,8 +165,8 @@ class _DevicesPageState extends State<DevicesPage> {
                 icon: ble.scanning ? Icons.wifi_tethering_rounded : Icons.bluetooth_disabled_rounded,
                 title: ble.scanning ? '正在搜索附近设备…' : '暂未发现设备',
                 description: ble.scanning
-                    ? '保持手机靠近目标设备，列表会自动刷新'
-                    : '点击“扫描”开始搜索，或检查设备是否已上电并处于广播状态\nAndroid 12+ 无需定位权限；安卓 11 及以下请打开定位服务',
+                    ? '保持手机靠近目标设备，列表会自动刷新；8 秒仍无结果会自动直连上次设备'
+                    : '点击“扫描”开始搜索，或检查设备是否已上电并处于广播状态\n一直搜不到就点上方「上次设备」直接连，不用给设备断电\nAndroid 12+ 无需定位权限；安卓 11 及以下请打开定位服务',
                 action: ble.scanning
                     ? null
                     : TextButton.icon(
@@ -176,6 +183,93 @@ class _DevicesPageState extends State<DevicesPage> {
                   name: ble.deviceName(result),
                   isLast: result.device.remoteId.str == ble.lastConnectedId,
                 )),
+        ],
+      ),
+    );
+  }
+}
+
+/// 上次连接的设备：不扫描也能直接连回来。
+///
+/// 设备被上一次的连接卡住时会停止广播，扫描注定搜不到，
+/// 此时按保存的地址直连才是唯一能恢复的方式。
+class _LastDeviceCard extends StatelessWidget {
+  const _LastDeviceCard({required this.ble});
+
+  final BleController ble;
+
+  @override
+  Widget build(BuildContext context) {
+    final id = ble.lastDeviceId!;
+    final name = (ble.lastDeviceName ?? '').trim();
+    final busy = ble.connectingDeviceId != null;
+
+    return Panel(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
+      radius: 18,
+      borderColor: AppColors.sky.withValues(alpha: .35),
+      child: Row(
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: AppColors.sky.withValues(alpha: .12),
+              borderRadius: BorderRadius.circular(13),
+            ),
+            child: const Icon(Icons.history_rounded, color: AppColors.sky, size: 20),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        name.isEmpty ? '上次设备' : name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    const MiniTag(label: '上次', color: AppColors.sky),
+                  ],
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  id,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 10.5,
+                    color: AppColors.textDim,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          FilledButton(
+            onPressed: busy ? null : () => ble.connectLastDevice(),
+            style: FilledButton.styleFrom(
+              backgroundColor: AppColors.sky.withValues(alpha: .16),
+              foregroundColor: AppColors.sky,
+              disabledBackgroundColor: AppColors.surfaceAlt,
+              disabledForegroundColor: AppColors.textDim,
+              minimumSize: const Size(0, 38),
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+            child: Text(busy ? '连接中' : '连接'),
+          ),
         ],
       ),
     );

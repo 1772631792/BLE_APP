@@ -62,13 +62,13 @@ class _BleHomePageState extends State<BleHomePage> with WidgetsBindingObserver {
   }
 
   void _onBleEvent() {
-    // 连接成功后按设置自动进入数据页，少点一次。
+    // 连接成功后按设置自动进入控件页，少点一次。
     final connected = _ble.connectedSerial;
     if (connected != _connectedSerial) {
       _connectedSerial = connected;
-      if (_ble.autoOpenTerminal && mounted && _tab != 1) {
+      if (_ble.autoOpenControls && mounted && _tab != 2) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) setState(() => _tab = 1);
+          if (mounted) setState(() => _tab = 2);
         });
       }
     }

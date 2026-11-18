@@ -76,7 +76,7 @@ connect() :335
 
 ### 设置持久化
 
-- key 命名统一 `settings.<驼峰字段>`，集中定义在 `ble_controller.dart:884-893`。
+- key 命名统一 `settings.<驼峰字段>`，集中定义在 `ble_controller.dart` 的 persistence 段；其中 `settings.lastDeviceId` / `settings.lastDeviceName` / `settings.autoConnectLast` 专门用于跨启动重连。
 - 读：只在 `init()` 里 `_loadSettings()` `:897-942`，指令表走 JSON，周期做 20~1000 ms 的 clamp。
 - 写：每个 setter 里**立即**落盘（`:981` 起）。写盘全部 `unawaited`，不阻塞 UI。
 - 加新设置的标准动作：加一个 `_kXxx` 常量 → 在 `_loadSettings` 里读 → 在 setter 里 `_saveBool/_saveInt/_saveString` → 在设置面板加控件。
@@ -190,6 +190,8 @@ python build.py            # 出 dist/BLEStudio-vX.Y.Z-YYYYMMDD.apk
 | --- | --- | --- |
 | `Could not close incremental caches` / `different roots: C:\Users\...\Pub\Cache\...` | Pub 缓存在 C 盘、工程在 D 盘，Kotlin 增量编译无法跨盘算相对路径 | `android/gradle.properties` 里已写死 `kotlin.incremental=false`，别删 |
 | 第一次构建卡在下载 | Gradle / Maven 依赖要走代理 | `android/gradle.properties` 加 `systemProp.http(s).proxyHost/Port`，改完 `./gradlew --stop` |
+| 重进 App 扫描不到设备 | 上次退出时设备端仍认为自己连着，停止广播 | 启动流程先 `_releaseStaleConnection`，再用 `BluetoothDevice.fromId(id).connect()` 直连，绕开扫描；逻辑在 `_connectLastOnLaunch()` |
+| 想改「记住哪台设备」 | `_rememberDevice()` 在连接成功时写入 | 改设备页「上次设备」卡片（`devices_page.dart` 的 `_LastDeviceCard`）或 `connectLastDevice()` |
 | `Unsupported class file major version` | JDK 不对 | 用 JDK 17（`android/app/build.gradle.kts` 指定） |
 | 装新包覆盖失败 | 换了签名或改了 `applicationId` | 卸载重装；改包名等于新应用 |
 | 模拟器扫不到设备 | 模拟器没有 BLE | 必须真机 |
