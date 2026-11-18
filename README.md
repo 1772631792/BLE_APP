@@ -3,7 +3,7 @@
 > 一个给 BLE（低功耗蓝牙）设备用的调试 / 遥控 App：扫描连接、GATT 调试、收发数据、VOFA+ JustFloat 波形，外加一套游戏手柄式的遥控面板。
 > 无广告、无联网权限、Android 12 及以上不需要定位权限。
 
-**当前版本**：`v2.1.1`（2026-11-18） · 安装包在 [Releases](../../releases) 里，也可以本地 `python build.py` 自己打。
+**当前版本**：`v2.1.3`（2026-11-18） · 安装包在 [Releases](../../releases) 里，也可以本地进 `flutter_application_1/` 跑 `python build.py` 自己打。
 
 ### 为什么做这个
 
@@ -73,7 +73,7 @@ flutter doctor -v
 
 ### 方式一：一键脚本（推荐）
 
-工程根目录下的 `build.py` 会自动编译、改好名字并打开产物目录：
+工程目录 `flutter_application_1/build.py` 会自动编译、改好名字并打开产物目录（在仓库根执行）：
 
 ```bash
 cd flutter_application_1
@@ -106,6 +106,8 @@ dist/BLEStudio-v2.0.0-20261118.apk
 
 ### 方式二：手动命令
 
+先 `cd flutter_application_1`，再执行：
+
 ```bash
 # 正式包
 flutter build apk --release
@@ -114,7 +116,7 @@ flutter build apk --release
 flutter run
 ```
 
-产物路径：
+产物路径（相对 `flutter_application_1/`）：
 
 | 构建类型 | 路径 |
 | --- | --- |
@@ -124,7 +126,7 @@ flutter run
 ### 安装到手机
 
 ```bash
-adb install -r build/app/outputs/flutter-apk/app-release.apk
+adb install -r flutter_application_1/build/app/outputs/flutter-apk/app-release.apk
 ```
 
 或直接把 APK 传到手机点击安装（需允许“安装未知来源应用”）。
@@ -320,22 +322,27 @@ def parse(frame: bytes):
 ## 6. 目录结构
 
 ```text
-lib/
-├── main.dart              应用外壳：状态横幅、底部导航、生命周期
-├── theme.dart             配色与 Material 主题
-├── widgets.dart           通用组件（卡片、信号条、渐变按钮、开关胶囊…）
-├── ble_controller.dart    扫描 / 连接重试 / 自动重连 / 心跳 / 收发 / 控件状态
-├── control_packet.dart    整包模式组包（HEX / 文本模板）
-├── wave.dart              JustFloat 解析与波形绘制
-├── services_view.dart     服务与特征值区块（并入设备页）
-└── pages/
-    ├── devices_page.dart  设备页
-    ├── data_page.dart     数据页（终端 / 波形）
-    └── controls_page.dart 控件页（摇杆 / 触控区 / 按键 / 全屏）
-test/
-├── wave_parser_test.dart   JustFloat 解析单测
-└── control_packet_test.dart 整包组包单测
-build.py                   一键打包脚本
+README.md                    本文件（仓库根）
+图标.png / 图标.ico           应用图标源文件，打包脚本会转成 mipmap
+flutter_application_1/      Flutter 工程
+├── lib/
+│   ├── main.dart            应用外壳：状态横幅、底部导航、生命周期
+│   ├── theme.dart           配色与 Material 主题
+│   ├── widgets.dart         通用组件（卡片、信号条、渐变按钮、开关胶囊…）
+│   ├── ble_controller.dart  扫描 / 连接重试 / 自动重连 / 心跳 / 收发 / 控件状态
+│   ├── control_packet.dart  整包模式组包（HEX / 文本模板）
+│   ├── wave.dart            JustFloat 解析与波形绘制
+│   ├── services_view.dart   服务与特征值区块（并入设备页）
+│   └── pages/
+│       ├── devices_page.dart  设备页
+│       ├── data_page.dart     数据页（终端 / 波形）
+│       └── controls_page.dart 控件页（摇杆 / 搓动 / 按键 / 全屏）
+├── test/
+│   ├── wave_parser_test.dart     JustFloat 解析单测
+│   └── control_packet_test.dart  整包组包单测
+├── android/                 Android 壳工程（权限、图标、包名）
+├── build.py                 一键打包脚本
+└── dist/                    打包产物（已 gitignore，不入库）
 ```
 
 ---
@@ -364,6 +371,11 @@ flutter run --release    # 真机跑正式包，验证性能
 ---
 
 ## 9. 更新日志
+
+### v2.1.3 · 2026-11-18
+
+- README 移到仓库根目录，补上项目介绍、技术栈、更新日志，目录结构与命令按新位置重写
+- 打包产物 `dist/` 加入 `.gitignore`，APK 不再进仓库
 
 ### v2.1.2 · 2026-11-18
 
