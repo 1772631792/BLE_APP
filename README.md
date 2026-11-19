@@ -5,7 +5,7 @@
 
 **当前版本**：`v3.0.1`（2026-11-18） · 安装包在 [Releases](../../releases) 里，也可以本地进 `flutter_application_1/` 跑 `python build.py` 自己打。
 
-**文档**：[文档目录](docs/README.md) · [继续开发指南](docs/dev-guide.md) · [v3.0.1 发布说明](docs/release-notes/v3.0.1.md) · [v3.0.0 发布说明](docs/release-notes/v3.0.0.md)
+**文档**：[文档目录](docs/README.md) · [代码结构](docs/code-structure.md) · [继续开发](docs/dev-guide.md) · [协议与固件对接](docs/protocol.md) · [构建与发布](docs/build.md) · [常见问题](docs/faq.md)
 
 ### 为什么做这个
 
@@ -441,9 +441,14 @@ README.md                    本文件（仓库根）
 图标.png / 图标.ico           应用图标源文件，打包脚本会转成 mipmap
 docs/
 ├── README.md                文档目录（索引）
-├── dev-guide.md             继续开发指南：代码结构、改法、踩坑
+├── code-structure.md        代码结构：文件职责、分层、状态机、数据流
+├── dev-guide.md             继续开发：加控件 / 改模板 / 加协议 / 踩坑
+├── protocol.md              协议与固件对接：整包字段表、独立指令、JustFloat
+├── build.md                 构建、打包、签名与发版
+├── faq.md                   常见问题与排障
 ├── release-notes/           各版本 Release 正文
-│   └── v3.0.0.md
+│   ├── v3.0.0.md
+│   └── v3.0.1.md
 └── screenshots/             界面截图
 flutter_application_1/      Flutter 工程
 ├── lib/
