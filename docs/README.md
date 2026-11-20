@@ -89,6 +89,7 @@ python build.py          # 产出 dist/BLEStudio-vX.Y.Z-YYYYMMDD.apk
 
 | 版本 | 内容 |
 | --- | --- |
+| [v3.0.2](release-notes/v3.0.2.md) | 终端重做：原始 HEX、TX/RX 过滤、去掉字节计数 |
 | [v3.0.1](release-notes/v3.0.1.md) | 启动自动连接上次设备、修复重进 App 搜不到；连上后改为进控件页 |
 | [v3.0.0](release-notes/v3.0.0.md) | 滑条 A/B 回归、搓动独立 `tx`/`ty` 通道、整包 11 字节 |
 

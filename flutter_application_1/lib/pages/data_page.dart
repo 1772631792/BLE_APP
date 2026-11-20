@@ -22,6 +22,9 @@ class _DataPageState extends State<DataPage> {
   final TextEditingController _input = TextEditingController();
   final Set<int> _hidden = {};
   DataMode _mode = DataMode.terminal;
+  // 终端里 TX / RX 是否显示（默认都显示，点一下只隐藏对应方向）。
+  bool _showTx = true;
+  bool _showRx = true;
   bool _sending = false;
   bool _paused = false;
   List<List<double>>? _frozen;
@@ -99,10 +102,6 @@ class _DataPageState extends State<DataPage> {
             onChanged: (mode) => setState(() => _mode = mode),
           ),
           const Spacer(),
-          _metric('TX', '${ble.txCount} B', AppColors.violet),
-          const SizedBox(width: 10),
-          _metric('RX', '${ble.rxCount} B', AppColors.sky),
-          const SizedBox(width: 10),
           Container(
             width: 8,
             height: 8,
@@ -113,28 +112,6 @@ class _DataPageState extends State<DataPage> {
           ),
         ],
       ),
-    );
-  }
-
-  Widget _metric(String label, String value, Color color) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.end,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          label,
-          style: const TextStyle(fontSize: 8.5, color: AppColors.textDim, letterSpacing: .6),
-        ),
-        Text(
-          value,
-          style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
-            color: color,
-            fontFamily: 'monospace',
-          ),
-        ),
-      ],
     );
   }
 
@@ -152,7 +129,11 @@ class _DataPageState extends State<DataPage> {
   }
 
   Widget _logPanel(BleController ble) {
-    final logs = ble.logs;
+    final logs = ble.logs.where((e) {
+      if (e.kind == LogKind.tx) return _showTx;
+      if (e.kind == LogKind.rx) return _showRx;
+      return true;
+    }).toList();
     final rx = ble.rx;
     final canNotify = rx != null && (rx.properties.notify || rx.properties.indicate);
     final notifying = rx != null && ble.notifyOn(rx);
@@ -167,9 +148,23 @@ class _DataPageState extends State<DataPage> {
       child: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
+            padding: const EdgeInsets.fromLTRB(8, 6, 4, 6),
             child: Row(
               children: [
+                _logChip(
+                  'TX',
+                  AppColors.accent,
+                  _showTx,
+                  () => setState(() => _showTx = !_showTx),
+                ),
+                const SizedBox(width: 6),
+                _logChip(
+                  'RX',
+                  AppColors.sky,
+                  _showRx,
+                  () => setState(() => _showRx = !_showRx),
+                ),
+                const Spacer(),
                 if (canNotify)
                   IconButton(
                     tooltip: notifying ? '关闭通知' : '开启通知',
@@ -182,17 +177,16 @@ class _DataPageState extends State<DataPage> {
                       color: notifying ? AppColors.accent : AppColors.textDim,
                     ),
                   ),
-                const Spacer(),
                 IconButton(
                   tooltip: '复制全部',
-                  onPressed: logs.isEmpty
+                  onPressed: ble.logs.isEmpty
                       ? null
                       : () => Clipboard.setData(ClipboardData(text: ble.logText)),
                   icon: const Icon(Icons.copy_rounded, size: 17),
                 ),
                 IconButton(
                   tooltip: '清空',
-                  onPressed: logs.isEmpty ? null : ble.clearLogs,
+                  onPressed: ble.logs.isEmpty ? null : ble.clearLogs,
                   icon: const Icon(Icons.delete_outline_rounded, size: 18),
                 ),
               ],
@@ -201,10 +195,10 @@ class _DataPageState extends State<DataPage> {
           const Divider(height: 1),
           Expanded(
             child: logs.isEmpty
-                ? const Center(
+                ? Center(
                     child: Text(
-                      '暂无数据，收发内容会显示在这里',
-                      style: TextStyle(fontSize: 11.5, color: AppColors.textDim),
+                      ble.logs.isEmpty ? '暂无数据，收发内容会显示在这里' : '这个方向已被过滤，点上方 TX / RX 恢复',
+                      style: const TextStyle(fontSize: 11.5, color: AppColors.textDim),
                     ),
                   )
                 : SelectionArea(
@@ -220,6 +214,35 @@ class _DataPageState extends State<DataPage> {
     );
   }
 
+  /// 终端头部的方向过滤小胶囊：亮 = 显示，暗 = 隐藏。
+  Widget _logChip(String label, Color color, bool on, VoidCallback onTap) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(8),
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: on ? color.withValues(alpha: .14) : Colors.transparent,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: on ? color.withValues(alpha: .4) : AppColors.stroke,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.w800,
+            letterSpacing: .5,
+            fontFamily: 'monospace',
+            color: on ? color : AppColors.textDim.withValues(alpha: .65),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _logLine(LogEntry entry) {
     final color = switch (entry.kind) {
       LogKind.tx => AppColors.accent,
@@ -228,37 +251,31 @@ class _DataPageState extends State<DataPage> {
       LogKind.system => AppColors.text,
       LogKind.info => AppColors.textDim,
     };
-    final tag = switch (entry.kind) {
-      LogKind.tx => 'TX',
-      LogKind.rx => 'RX',
-      LogKind.error => 'ERR',
-      LogKind.system => 'SYS',
-      LogKind.info => 'INF',
-    };
+    final hex = entry.hex;
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
-            width: 54,
+            width: 56,
             child: Text(
               entry.stamp,
               style: TextStyle(
                 fontSize: 9.5,
-                height: 1.6,
+                height: 1.55,
                 fontFamily: 'monospace',
-                color: AppColors.textDim.withValues(alpha: .55),
+                color: AppColors.textDim.withValues(alpha: .5),
               ),
             ),
           ),
           SizedBox(
-            width: 26,
+            width: 32,
             child: Text(
-              tag,
+              entry.tag,
               style: TextStyle(
                 fontSize: 9.5,
-                height: 1.6,
+                height: 1.55,
                 fontWeight: FontWeight.w800,
                 fontFamily: 'monospace',
                 color: color,
@@ -266,14 +283,32 @@ class _DataPageState extends State<DataPage> {
             ),
           ),
           Expanded(
-            child: Text(
-              entry.message,
-              style: TextStyle(
-                fontSize: 11.5,
-                height: 1.6,
-                fontFamily: 'monospace',
-                color: color.withValues(alpha: .92),
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  entry.message,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    height: 1.55,
+                    fontFamily: 'monospace',
+                    color: color.withValues(alpha: .92),
+                  ),
+                ),
+                if (hex != null && hex.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 1),
+                    child: Text(
+                      'HEX  $hex',
+                      style: TextStyle(
+                        fontSize: 10,
+                        height: 1.5,
+                        fontFamily: 'monospace',
+                        color: AppColors.textDim.withValues(alpha: .8),
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ),
         ],

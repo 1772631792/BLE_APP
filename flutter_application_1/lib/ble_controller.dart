@@ -16,11 +16,22 @@ enum LinkPhase { idle, connecting, connected, reconnecting }
 enum LogKind { info, tx, rx, error, system }
 
 class LogEntry {
-  LogEntry(this.message, this.kind) : time = DateTime.now();
+  LogEntry(this.message, this.kind, {this.hex}) : time = DateTime.now();
 
   final String message;
   final LogKind kind;
+
+  /// 原始字节的 HEX 形式，终端里单独一行显示，文本模式下也能看到真实数据。
+  final String? hex;
   final DateTime time;
+
+  String get tag => switch (kind) {
+        LogKind.tx => 'TX',
+        LogKind.rx => 'RX',
+        LogKind.error => 'ERR',
+        LogKind.system => 'SYS',
+        LogKind.info => 'INF',
+      };
 
   String get stamp {
     String p(int n) => n.toString().padLeft(2, '0');
@@ -222,7 +233,9 @@ class BleController extends ChangeNotifier {
   int get rxCount => _rxCount;
   int get mtu => _device?.mtuNow ?? 23;
 
-  String get logText => _logs.reversed.map((e) => '[${e.stamp}] ${e.message}').join('\n');
+  String get logText => _logs.reversed
+      .map((e) => e.hex == null ? '[${e.stamp}] ${e.tag}  ${e.message}' : '[${e.stamp}] ${e.tag}  ${e.message}\n    HEX ${e.hex}')
+      .join('\n');
 
   // ------------------------------------------------------------- lifecycle
 
@@ -834,7 +847,8 @@ class BleController extends ChangeNotifier {
     if (data.isEmpty) return;
     _rxCount += data.length;
     _wave.feed(data);
-    _log('$prefix ${data.length}B  ${_decode(data)}', LogKind.rx);
+    final text = _decode(data);
+    _log(prefix == 'RX' ? text : '$prefix  $text', LogKind.rx, hex: toHex(data));
   }
 
   Future<void> toggleNotify(BluetoothCharacteristic c) async {
@@ -937,7 +951,7 @@ class BleController extends ChangeNotifier {
       await channel.write(bytes, withoutResponse: withoutResponse);
       _txCount += bytes.length;
       _lastSentPreview = preview;
-      _logTx(bytes.length, preview, silent: silent);
+      _logTx(preview, silent: silent, hex: toHex(bytes));
       return true;
     } catch (e) {
       if (silent) {
@@ -1384,8 +1398,12 @@ class BleController extends ChangeNotifier {
     return text;
   }
 
-  String _decode(List<int> data) =>
-      _hexReceive ? toHex(data) : utf8.decode(data, allowMalformed: true);
+  /// 文本模式把控制字符换成点，避免终端里出现方块和乱码；原始字节另起一行显示。
+  String _decode(List<int> data) {
+    if (_hexReceive) return toHex(data);
+    final text = utf8.decode(data, allowMalformed: true);
+    return text.replaceAll(RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'), '.');
+  }
 
   static String toHex(List<int> data) =>
       data.map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase()).join(' ');
@@ -1404,7 +1422,7 @@ class BleController extends ChangeNotifier {
   }
 
   /// 整包按周期发送，全量记日志会刷屏：内容没变就不记，变化时最多约 8 条/秒。
-  void _logTx(int length, String preview, {required bool silent}) {
+  void _logTx(String preview, {required bool silent, String? hex}) {
     final now = DateTime.now();
     if (silent) {
       if (preview == _lastTxLogPreview) return;
@@ -1412,12 +1430,12 @@ class BleController extends ChangeNotifier {
     }
     _lastTxLogAt = now;
     _lastTxLogPreview = preview;
-    _log('TX ${length}B  $preview', LogKind.tx);
+    _log(preview, LogKind.tx, hex: hex);
   }
 
-  void _log(String message, LogKind kind) {
+  void _log(String message, LogKind kind, {String? hex}) {
     if (_disposed) return;
-    _logs.insert(0, LogEntry(message, kind));
+    _logs.insert(0, LogEntry(message, kind, hex: hex));
     if (_logs.length > _maxLogs) _logs.removeLast();
     _notify();
   }
